@@ -1,0 +1,27 @@
+name: Mirror to Azure DevOps
+
+on:
+  push:
+    branches:
+      - '**'
+  delete:
+    branches:
+      - '**'
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push mirror to Azure DevOps
+        env:
+          AZURE_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
+        run: |
+          git remote add azure \
+            "https://irbre:${AZURE_PAT}@dev.azure.com/irbre/Vendaval%20IA/_git/Vendaval%20IA"
+          git push --mirror azure
