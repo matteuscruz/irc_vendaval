@@ -1,1 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
 
+# uv
+.venv/
+.python-version
+uv.lock
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Artifacts and data (keep directory structure, ignore content)
+artifacts/logs/*
+artifacts/models/*
+dataset/*
+!artifacts/logs/.gitkeep
+!artifacts/models/.gitkeep
+!dataset/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
