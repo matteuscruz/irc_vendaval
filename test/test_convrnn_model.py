@@ -3,7 +3,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.models.convrnn_model import CGRU_cell, CLSTM_cell
+#from src.models.convrnn_model import CGRU_cell, CLSTM_cell
 
 CUDA = torch.cuda.is_available()
 

@@ -1,0 +1,195 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{longtable}
+
+\geometry{top=25mm,bottom=25mm,left=20mm,right=20mm}
+\title{\textbf{Metodologia: Correção de Viés de Rajadas de Vento Extremo\\(IRC Vendaval)}}
+\author{\textbf{Documentação do Experimento}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Fontes de Dados}
+O ERA5 é um produto de reanálise do ECMWF ($\sim$31~km de grade) --- representa o estado médio da atmosfera, não o pico de vento num ponto. O INMET mede a rajada real. A diferença sistemática entre os dois é o viés que se deseja corrigir.
+
+\begin{table}[h]
+\centering
+\caption{Especificação dos Datasets}
+\vspace{2mm}
+\begin{tabularx}{\textwidth}{llllX}
+\toprule
+\textbf{Dataset} & \textbf{Arquivo} & \textbf{Conteúdo} & \textbf{Período} & \textbf{Resolução} \\
+\midrule
+INMET & \texttt{INMET\_Stratified.nc} & Observações \textit{in situ} de rajada máxima diária & 2020--2024 & Diária, 30 estações \\
+ERA5 (base) & \texttt{ERA5\_Stratified.nc} & Reanálise atmosférica global co-localizada nas estações & 2000--2026 (03) & Horária, mesmas estações \\
+ERA5-18UTC & \texttt{dados\_era5\_parana\_18utc/} & Snapshot pré-frontal (CAPE, cisalhamento, espessura) & Subconjunto Paraná & Diária, 18UTC \\
+BT55 & \texttt{dados\_temperatura\_brilho\_BT55/} & Temperatura de brilho satelital (convecção profunda) & Subconjunto Paraná & Diária \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent \textbf{Em integração:} um quinto dataset, \texttt{ERA5\_Features\_Basin\_2000\_2026.nc} (features ERA5 pré-computadas para a bacia inteira, 2000--2026), já foi transferido para o ambiente de treino (volume de dados na nuvem) mas \textbf{ainda não é consumido por nenhum \textit{loader} do pipeline de features} --- é trabalho em andamento, não uma fonte ativa hoje.
+
+\section{Processamento dos Dados (\texttt{NetCDFLoader})}
+O ERA5 chega em resolução horária. O \textit{loader} (\texttt{src/data/netcdf\_loader.py}) aplica resample horário $\rightarrow$ diário e deriva um conjunto bem mais amplo de \textit{features} do que uma média/pico/desvio simples:
+
+\begin{itemize}
+    \item \textbf{Cálculo Horário:} $\texttt{wind\_mag} = \sqrt{u^2 + v^2}$
+    \item \textbf{Agregações diárias:} média (\texttt{.resample("1D").mean()}), pico (\texttt{wind\_mag\_max}, \texttt{t2m\_max}), mínimo (\texttt{wind\_mag\_min}, \texttt{t2m\_min}) e desvio-padrão (\texttt{wind\_mag\_std}) sobre as 6 variáveis brutas (\texttt{u10}, \texttt{v10}, \texttt{t2m}, \texttt{sp}, \texttt{d2m}, \texttt{precip})
+    \item \textbf{Features derivadas:} \texttt{gust\_factor} (pico/média --- caráter convectivo), \texttt{t2m\_range} (amplitude térmica --- mistura vertical), \texttt{relative\_humidity} (fórmula de Magnus), \texttt{pressure\_tendency} (queda de pressão --- precede vendavais), lags de 1/2/3/7 dias e média móvel de 3/7 dias de \texttt{wind\_mag\_max} (persistência sinótica), anomalia em relação à média móvel de 7 dias, e direção do vento codificada como \texttt{wind\_dir\_sin}/\texttt{wind\_dir\_cos}
+\end{itemize}
+
+\noindent \textbf{Extensão opcional (\texttt{load\_extended()}):} quando os diretórios de ERA5-18UTC e BT55 existem localmente, o \textit{loader} faz o \textit{merge} condicional dessas duas fontes extras ao ERA5 base, alinhando por tempo comum. Estações fora da cobertura desses datasets extras recebem \texttt{NaN} nessas colunas. Esse mecanismo é o que habilita o \textit{ablation study} (Seção~\ref{sec:ablation}).
+
+O \texttt{wind\_mag\_max} continua sendo a \textit{feature} mais importante: o pico diário do ERA5 é o \textit{proxy} mais correlacionado com as rajadas INMET.
+
+\section{Clusterização Espacial}
+As 30 estações INMET são agrupadas em 6 clusters via \textit{spatial join} com polígonos do \textit{shapefile} de regiões de vento (regimes distintos --- orografia, maritimidade, continentalidade). Cada cluster tem seu próprio modelo --- captura o comportamento regional sem misturar regimes meteorológicos diferentes. Distribuição real de estações por cluster: 5, 8, 3, 10, 3 e 1 (clusters 1--6, respectivamente).
+
+\section{Variáveis Explicativas}
+O conjunto de \textit{features} cresceu de um núcleo fixo para uma estrutura de \textbf{grupos combináveis} (\texttt{src/pipelines/common.py::resolve\_feature\_groups()}), usada pelo \textit{ablation study} (Seção~\ref{sec:ablation}) pra isolar o efeito de cada grupo.
+
+\begin{table}[h]
+\centering
+\caption{Grupos de Variáveis Explicativas}
+\vspace{2mm}
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{Grupo} & \textbf{Nº features} & \textbf{Conteúdo} \\
+\midrule
+\texttt{original} & 34 & Vento ERA5 (u/v/mag/max/min/std + direção sin/cos), convecção e persistência (\texttt{gust\_factor}, lags 1--7d de \texttt{wind\_mag\_max}), termodinâmica (\texttt{t2m}, \texttt{d2m}, \texttt{relative\_humidity}, \texttt{t2m\_range}), dinâmica sinótica (\texttt{surface\_pressure}, \texttt{pressure\_tendency}, \texttt{total\_precipitation}), sazonalidade (\texttt{day\_sin/cos}, \texttt{month\_sin/cos}, \texttt{era5\_clim\_wind}), localização (\texttt{latitude}, \texttt{longitude}) e conectividade autoregressiva da própria observação INMET (\texttt{lag1-3\_gust\_obs}, \texttt{rolling7d\_gust\_obs}) \\
+\texttt{era5\_18z} & 11 & Snapshot pré-frontal às 18UTC: \texttt{cape\_18z}, \texttt{msl\_18z}, magnitude de vento a 10m/100m, cisalhamentos verticais (superfície$\rightarrow$100m, 850$\rightarrow$300hPa, 850$\rightarrow$500hPa), espessura 1000--500hPa, \textit{lapse rate} 850--500hPa, umidade específica 850hPa e tendência de pressão ao nível do mar \\
+\texttt{bt55} & 4 & Temperatura de brilho satelital: \texttt{bt55\_flag} (convecção profunda), \texttt{bt55\_rolling3d}, \texttt{bt55\_rolling7d}, \texttt{bt55\_frac\_month} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent O \textit{ablation study} varia entre usar só \texttt{original} (41 features) ou \texttt{original,era5\_18z,bt55} (56 features, grupo \texttt{"all"}). ERA5-18UTC e BT55 cobrem apenas um subconjunto das estações (região do Paraná) --- fora dessa cobertura, as colunas ficam \texttt{NaN} para aquela estação.
+
+\noindent \textbf{Pré-processamento:} \texttt{SimpleImputer(strategy="mean")} para valores faltantes + \texttt{RobustScaler} (resistente a \textit{outliers}). Ambos ajustados apenas no conjunto de treino para evitar \textit{data leakage} (\texttt{src/pipelines/common.py::preprocess\_df}).
+
+\section{Variável Preditora (\textit{Target})}
+Duas definições de \textit{target} coexistem hoje, uma por família de modelo (Seção~\ref{sec:modelagem}).
+
+\noindent \textbf{LazyPredict / MLP --- razão de correção:}
+\begin{equation}
+y_{\text{treino}} = \frac{\text{INMET\_gust}}{\text{ERA5\_wind\_mag\_max}}
+\end{equation}
+O modelo aprende quanto o ERA5 subestima ou superestima a rajada real em termos relativos. Na predição, o valor absoluto é recuperado multiplicando de volta:
+\begin{equation}
+\text{INMET\_pred} = \text{razão\_predita} \times \text{ERA5\_wind\_mag\_max\_val}
+\end{equation}
+Esta é a abordagem correta de \textit{bias correction} (vs. \textit{downscaling} estatístico, que prevê o valor absoluto): o modelo aprende o fator de escala relativo, que é mais estável entre dias e estações.
+
+\noindent \textbf{LSTM --- anomalia climatológica:}
+\begin{equation}
+y_{\text{treino}} = \text{INMET\_gust} - \text{climatologia\_INMET}(\text{dia do ano}, \text{estação})
+\end{equation}
+onde a climatologia é calculada só sobre o período de treino (sem \textit{leakage}). Essa abordagem é diferente da razão com ERA5 usada por LazyPredict/MLP --- não há, hoje, uma única definição de \textit{target} unificada entre todas as pipelines.
+
+\section{Modelagem}
+\label{sec:modelagem}
+Existem hoje \textbf{4 pipelines de produção} independentes (\texttt{src/pipelines/cluster\_*.py}), não apenas o MLP.
+
+\subsection{LazyPredict --- \textit{Screening} Amplo}
+Roda cerca de 30 regressores \texttt{sklearn} por cluster via \texttt{LazyRegressor} (exclui \texttt{SVR}, \texttt{NuSVR}, \texttt{KernelRidge} e \texttt{GaussianProcessRegressor} por serem $O(n^2\text{--}n^3)$, inviáveis nos volumes de dados atuais). Não é apenas uma etapa de triagem descartável: é uma pipeline de produção completa, com artefatos próprios (\texttt{results.csv}, rankings por cluster) e parte do \textit{ablation study}.
+
+\subsection{\texttt{MLPRegressor} com \textit{Extreme Weighting}}
+\begin{itemize}
+    \item \textbf{Por que MLP?} O \textit{screening} do LazyPredict identificou o \texttt{MLPRegressor} como um dos modelos mais competitivos entre os clusters.
+    \item \textbf{Arquitetura:} Rede neural densa, 2 camadas ocultas ($128 \rightarrow 64$ neurônios), ativação ReLU, solver Adam, regularização L2 ($\alpha=0.001$), \textit{early stopping} com 10\% do treino como validação interna (\texttt{n\_iter\_no\_change=30}, \textit{learning rate} adaptativo).
+    \item \textbf{Extreme Weighting via Oversampling:} Como o \texttt{MLPRegressor} não aceita \texttt{sample\_weight} diretamente, a solução continua sendo duplicar amostras de vento alto proporcionalmente ao peso $w \propto \text{vento}^2$ (\texttt{extreme\_power=2.0}), forçando o modelo a ``ver'' mais eventos extremos durante o treino.
+\end{itemize}
+
+\subsection{LSTM \textit{Dual-Head} por Cluster}
+Pipeline \texttt{cluster\_lstm} (\texttt{cluster\_dual\_head\_lstm}), treinada por cluster $\times$ estação climática (YAML-driven). Alvo é a anomalia climatológica (Seção anterior). Usa \textit{split} temporal próprio e, diferente das demais pipelines, também um \textbf{\textit{split} espacial de estações} (20\% das estações reservadas inteiramente para teste, nunca vistas no treino/validação) --- ver Seção~\ref{sec:split}. Suporta \textit{loss} \textit{pinball} (regressão quantílica) e Huber como alternativas ao MSE padrão (\texttt{src/pipeline/loss/registry.py}).
+
+\subsection{GAN --- Aumento de Dados Sintéticos}
+Pipeline \texttt{cluster\_gan}: gera rajadas sintéticas com foco em extremos via EVT/GPD (\textit{Extreme Value Theory}/\textit{Generalized Pareto Distribution}) + WGAN-GP condicional tabular, atribuindo a cada amostra sintética um vetor de \textit{features} real por \textit{nearest-neighbor}. O CSV resultante é consumido por LazyPredict e MLP como uma das 4 configurações do \textit{ablation study} (Seção~\ref{sec:ablation}).
+
+\section{Split Temporal e Espacial}
+\label{sec:split}
+As duas famílias de modelo usam janelas temporais \textbf{diferentes} entre si --- não há um único split documentável para "a pipeline".
+
+\begin{description}
+    \item[LazyPredict / MLP:] Treino = 2000--2020 (21 anos), Validação = 2021--2022, Teste = 2023. Só \textit{split} temporal, sem \textit{split} espacial --- todas as 30 estações aparecem em treino, validação e teste. O objetivo é calibrar o ERA5 nas estações conhecidas, não generalizar para locais novos.
+    \item[LSTM:] Treino = 2020--2022, Validação = 2023, Teste = 2024. Além do \textit{split} temporal, reserva 20\% das estações (\texttt{test\_station\_fraction=0.2}) exclusivamente para teste --- essas estações não aparecem em treino nem validação, avaliando também capacidade de generalização espacial (interpolação para estações novas), diferente do objetivo do MLP.
+\end{description}
+
+\section{Métricas de Avaliação}
+O \text{Bias@P90} e \text{RMSE@P90} são as métricas principais para este problema --- $R^2$ global mascara a compressão de extremos.
+
+\begin{table}[h]
+\centering
+\caption{Métricas de Avaliação Definidas}
+\vspace{2mm}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Métrica} & \textbf{O que mede} \\
+\midrule
+$R^2$ & Variância explicada global \\
+\text{RMSE} & Erro médio quadrático global \\
+\text{Bias} & Erro sistemático médio (positivo = superestima) \\
+\text{Bias@P90} & Erro sistemático apenas nos dias de vento extremo ($\ge$ P90) \\
+\text{RMSE@P90} & RMSE apenas nos dias extremos \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{\textit{Ablation Study}}
+\label{sec:ablation}
+As 3 pipelines de modelagem (LazyPredict, MLP, LSTM) rodam hoje sobre uma matriz comum de \textbf{4 configurações de dados}, orquestrada por \texttt{scripts/\_ablation\_common.py} e \texttt{run\_modal.sh}:
+
+\begin{description}
+    \item[\texttt{original}] Grupo de features \texttt{original} (41), sem dados sintéticos.
+    \item[\texttt{synthetic}] Mesmas 41 features + dados sintéticos do GAN.
+    \item[\texttt{newfeatures}] Grupo \texttt{original,era5\_18z,bt55} (56 features), sem sintéticos.
+    \item[\texttt{all}] 56 features + dados sintéticos do GAN.
+\end{description}
+
+\noindent O objetivo é isolar, pra cada pipeline, o efeito de features novas (ERA5-18UTC + BT55) vs. dados sintéticos (GAN) vs. os dois combinados --- 3 pipelines $\times$ 4 configurações = 12 combinações comparadas lado a lado.
+
+\section{Resultados Atuais (\textit{split} de teste, MLP --- configuração \texttt{original})}
+O modelo reduz o \text{Bias@P90} de $\sim$$-9$ a $-12$~m/s (ERA5 bruto) para $-3.5$ a $+0.5$~m/s na maioria dos clusters --- melhora substancial, mas ainda com compressão residual dos extremos em boa parte dos clusters, e $R^2$ negativo em 2 dos 6 (clusters 5 e 6, os menores em número de estações).
+
+\begin{table}[h]
+\centering
+\caption{Resultados obtidos por Cluster (experimento \texttt{ablation\_original}, \textit{split} de teste)}
+\vspace{2mm}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Cluster} & \textbf{Estações} & \textbf{$R^2$} & \textbf{Bias@P90} & \textbf{ERA5 Bias@P90 (baseline)} \\
+\midrule
+1 & 5  & 0.408  & $-1.7$ m/s & $-9.8$ m/s \\
+2 & 8  & 0.204  & $-2.1$ m/s & $-9.5$ m/s \\
+3 & 3  & 0.261  & $+0.5$ m/s & $-7.0$ m/s \\
+4 & 10 & 0.067  & $-0.9$ m/s & $-10.0$ m/s \\
+5 & 3  & $-0.159$ & $-3.5$ m/s & $-9.0$ m/s \\
+6 & 1  & $-0.057$ & $-0.5$ m/s & $-12.1$ m/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent \textbf{Nota sobre esta tabela:} valores extraídos diretamente de \texttt{artifacts/mlp\_clusters/original/\_partial/csv/mlp\_cluster\_results.csv} (colunas \texttt{MLP\_test\_*}/\texttt{ERA5\_test\_*}), correspondendo ao \textit{split} de teste (2023) definido na Seção~\ref{sec:split} --- não ao \textit{split} de validação. Os demais 11 combos do \textit{ablation study} (Seção~\ref{sec:ablation}) e as pipelines LazyPredict/LSTM têm suas próprias tabelas de resultado, não reproduzidas aqui.
+
+\section{Limitação Principal e Próximos Passos}
+O \text{Bias@P90} permanece negativo na maioria dos clusters --- o modelo ainda subestima os dias de rajada extrema, embora bem menos que o ERA5 bruto.
+
+\noindent \textbf{Causa:} A razão \text{INMET/ERA5} (ou a anomalia, no caso do LSTM) aprendida no treino é dominada pelos dias comuns (maioria dos dados), mesmo com o \textit{extreme weighting}.
+
+\noindent \textbf{Já implementado (não é mais trabalho futuro):} regressão quantílica via \textit{pinball loss} ($\tau=0.75$ e $\tau=0.9$) e \textit{Huber loss} já estão disponíveis e em uso na pipeline LSTM (\texttt{src/pipeline/loss/registry.py}), como alternativa ao MSE padrão para calibrar diretamente a cauda da distribuição.
+
+\noindent \textbf{Próximos passos reais:} (1) integrar o dataset \texttt{ERA5\_Features\_Basin\_2000\_2026.nc} ao pipeline de \textit{features} (hoje só transferido, ainda não consumido); (2) ampliar a cobertura espacial de ERA5-18UTC/BT55 além da região do Paraná, hoje limitante do grupo de features \texttt{era5\_18z}/\texttt{bt55} para boa parte das estações; (3) avaliar se a \textit{loss} \textit{pinball} do LSTM, já implementada, melhora o \text{Bias@P90} das pipelines LazyPredict/MLP se adaptada para elas.
+
+\end{document}

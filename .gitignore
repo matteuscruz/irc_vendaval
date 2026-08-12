@@ -18,13 +18,22 @@ uv.lock
 .coverage
 htmlcov/
 
-# Artifacts and data (keep directory structure, ignore content)
-artifacts/logs/*
-artifacts/models/*
+# Artifacts and data (keep directory structure, ignore content) — resultados
+# de treino (lazy_modal/mlp_modal/modal/gan_modal/corrected_grid/...) são
+# regeneráveis via Modal e já sincronizados no repo do dashboard; nunca
+# deveriam ter ido pro git (inflou o .git pra ~19GB).
+artifacts/*
 dataset/*
-!artifacts/logs/.gitkeep
-!artifacts/models/.gitkeep
+!artifacts/.gitkeep
 !dataset/.gitkeep
+
+# Repositórios git aninhados (referência/vendored, cada um com seu próprio
+# histórico) — nunca devem ser adicionados como blob normal (git avisa
+# "adding embedded git repository"); se algum dia precisar deles versionados
+# aqui de verdade, usar `git submodule add`, não commitar direto.
+scrollytelling/
+research/GFS-NWP-Wind-Correction/
+research/TRWindBC/
 
 # IDE
 .vscode/

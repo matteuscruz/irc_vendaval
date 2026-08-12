@@ -8,12 +8,33 @@ dependencies = [
     "torch>=2.0.0",
     "tensorflow>=2.13.0",
     "numpy>=1.24.0",
+    "pydantic>=2.13.3",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.7.2",
+    "matplotlib>=3.10.9",
+    "dash>=2.17.0",
+    "dash-bootstrap-components>=1.6.0",
+    "plotly>=5.22.0",
+    "geopandas>=0.14.0",
+    "pandas>=2.0.0",
+    "optuna>=4.9.0",
+    "xarray>=2024.1.0",
+    "dask>=2024.1.0",
+    "cartopy>=0.22.0",
+    "shapely>=2.0.0",
+    "lazypredict[boost]>=0.3.0",
+    "xgboost>=2.0.0",
+    "shap>=0.46.0",
+    "pyarrow>=14.0.0",
+    "netcdf4>=1.6.0",
+    "seaborn>=0.13.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
+    "modal>=0.73.0",
 ]
 
 [build-system]
@@ -26,3 +47,8 @@ packages = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["test"]
 pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "modal>=1.4.2",
+]

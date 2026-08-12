@@ -1,0 +1,85 @@
+version: 1
+
+experiment:
+  name: "weighted_lstm_v1"
+  seed: 42
+  output_dir: "/artifacts/experiments"
+
+data:
+  path: "/dataset/dataset_v2_ML_ready.csv"
+  target: "rajada_max_corrigida"
+  station_col: "station"
+  test_stations: ["A853"]
+  train_stations: ["A805", "A854", "A856"]
+  drop_cols:
+    - "rajada_max_final_ms"
+    - "direcao_vento"
+    - "latitude_x"
+    - "longitude_x"
+    - "latitude_y"
+    - "longitude_y"
+    - "station_lat"
+    - "station_lon"
+
+preprocessing:
+  temporal_split_ratio: 0.8
+  lookback: 7
+  imputer_strategy: "median"
+  feature_engineering:
+    add_month: true
+    add_season_dummies: true
+
+model:
+  name: "lstm"
+  params:
+    lstm_units: 1024
+    dropout: 0.1
+    learning_rate: 0.00001
+    clipnorm: 1.0
+
+training:
+  strategy: "standard"
+  batch_size: 128
+  max_epochs: 100
+  early_stopping:
+    monitor: "val_loss"
+    patience: 30
+    restore_best_weights: true
+  reduce_lr:
+    monitor: "val_loss"
+    factor: 0.5
+    patience: 5
+    min_lr: 0.000001
+  checkpoint:
+    enabled: true
+    monitor: "val_loss"
+  sample_weight:
+    enabled: true
+    percentile: 90
+    extreme_weight: 5.0
+
+losses:
+  - name: "mse"
+  - name: "huber"
+    params:
+      delta: 1.0
+  - name: "pinball"
+    params:
+      tau: 0.75
+  - name: "pinball"
+    params:
+      tau: 0.90
+
+validation:
+  percentiles: [0.90, 0.95]
+  metrics: ["r2", "rmse", "mae", "bias"]
+
+visualization:
+  enabled: true
+  save_dir: "plots"
+  plots: ["convergence", "scatter", "violin", "bar_r2", "bar_bias", "tradeoff"]
+
+sweeps:
+  enabled: false
+  model: ["lstm"]
+  seed: [42]

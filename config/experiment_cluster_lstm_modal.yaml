@@ -1,0 +1,70 @@
+version: 1
+
+experiment:
+  name: cluster_lstm_v1
+  seed: 42
+  output_dir: /artifacts/modal/experiments
+
+data:
+  raw_dir: /dataset/raw
+  shp_dir: /dataset/shp
+  target_var: daily_wind_gust_max
+  train_slice: ["2008-01-01", "2018-12-31"]
+  val_slice:   ["2019-01-01", "2019-12-31"]
+  test_slice:  ["2020-01-01", "2025-12-31"]
+  test_station_fraction: 0.2
+
+preprocessing:
+  lookback: 7
+
+model:
+  name: cluster_dual_head_lstm
+  params:
+    units: 64
+    dropout: 0.4
+    l2_reg: 0.01
+    learning_rate: 0.001
+    weight_normal: 0.7
+    weight_extreme: 0.3
+    extreme_weight: 20.0
+    extreme_threshold: 1.5
+
+training:
+  epochs: 50
+  batch_size: 64
+  patience: 5
+  min_samples: 10
+
+augmentation:
+  method: none               # extreme_gan | extreme_diffusion | none
+  extreme_percentile: 90.0   # top 10% = extremos
+  multiplier: 3.0            # gerar 3x a contagem de extremos reais
+  extreme_gan:
+    latent_dim: 32
+    hidden_units: 256
+    epochs: 200
+    batch_size: 64
+    n_critic: 5
+    lambda_gp: 10.0
+    lambda_y: 0.5
+    learning_rate_g: 0.0001
+    learning_rate_d: 0.0001
+    k_shift: 3              # iteracoes de distribution shifting
+    c_shift: 0.3            # fracao descartada por iteracao
+    # tau: 0.05             # prob. alvo para GPD inverse na inferencia
+    use_bias_correction: false  # QDM ERA5→INMET nas features de vento
+    n_quantiles: 100            # resolucao do mapeamento quantil
+  extreme_diffusion:
+    time_steps: 200
+    sampling_steps: 50
+    hidden_units: 512
+    time_emb_dim: 64
+    epochs: 100
+    batch_size: 64
+    p_uncond: 0.1
+    guidance_scale: 5.0
+    y_target: 2.0
+
+visualization:
+  enabled: true
+  save_dir: plots
