@@ -4,6 +4,22 @@ IRC Vendaval — Modal deployment (MLPRegressor por cluster)
 Executa a pipeline MLP com extreme-weighting por cluster espacial na nuvem
 (Modal) e baixa os artefatos gerados para o diretório local.
 
+Arquitetura do Modelo e Por Quê
+-------------------------------
+O modelo base é um `MLPRegressor` (Scikit-Learn) treinado individualmente
+para cada cluster espacial com as seguintes particularidades de desenho:
+- Camadas Ocultas: Configuração padrão `(128, 64)` com ativação ReLU e otimizador Adam.
+- Regularização: Penalidade L2 (`alpha=0.001`), `early_stopping=True` com fração de validação de 10%, paciência de 30 épocas sem melhora (`n_iter_no_change=30`) e limite máximo de `max_iter=500` iterações do solver.
+- Target Formulation (Fator de Correção): Ao invés de prever a rajada absoluta diretamente, o MLP aprende a razão `y_true / era5_wind_mag_max`. Durante a inferência, a predição final é reconstruída como `y_pred = ratio_pred * era5_wind_mag_max`.
+- Extreme Weighting (Oversampling Ponderado): As amostras recebem pesos `w = (y / y_max)^extreme_power`. O conjunto de treino sofre oversampling proporcional aos pesos antes do ajuste.
+
+O porquê desta arquitetura: Redes densas clássicas sofrem com desbalanceamento 
+quando a distribuição do vento é fortemente assimétrica (cauda longa à direita). 
+Modelar a razão (`ratio`) permite que a rede atue diretamente como um operador de 
+correção de viés multiplicativo sobre a física do ERA5. Além disso, o 
+extreme weighting foca a capacidade representacional da rede neural nos 
+eventos mais severos e danosos sem distorcer o domínio físico dos dados.
+
 Uso
 ---
 # Rodar e baixar artefatos (default)

@@ -12,7 +12,7 @@ from src.utils.heartbeat import Heartbeat
 
 
 class NetCDFLoader:
-    """Carrega INMET_Stratified.nc e ERA5_Stratified.nc e os alinha temporalmente."""
+    """Carrega o alvo observado do INMET (y) e as variáveis de entrada do ERA5 (x), alinhando-os temporalmente."""
 
     ERA5_FEATURES = [
         "10m_u_component_of_wind",

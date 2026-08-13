@@ -428,7 +428,7 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     if not has_test:
         print(f"   {label}: sem dados de teste (2024) — val segue valendo pra seleção, teste omitido.")
 
-    # Climatologia por estação (só treino → sem leakage)
+    # Climatologia por estação
     gust_p50_station = df_tr.groupby("estacao")[TARGET_VAR].median()
     gust_p50_cluster = float(df_tr[TARGET_VAR].median())
     df_tr = df_tr.copy()

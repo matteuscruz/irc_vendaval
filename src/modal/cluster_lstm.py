@@ -4,6 +4,21 @@ IRC Vendaval — Modal deployment (pipeline de clusters)
 Executa o pipeline dual-especialidade por cluster na nuvem (Modal) e baixa
 os artefatos gerados para o diretório local.
 
+Arquitetura do Modelo e Por Quê
+-------------------------------
+O modelo base é um LSTM em configuração Multi-Task Learning com um
+backbone compartilhado e duas saídas paralelas (dual-especialidade):
+- Backbone: `LSTM(units=64)` -> `BatchNormalization()` -> `Dense(16, elu)` -> `Dropout()`
+- Saída 1 (`head_normal`): `Dense(1)` otimizada com Huber loss. Foca em prever o regime padrão e estável das rajadas.
+- Saída 2 (`head_extreme`): `Dense(1)` otimizada com `robust_extreme_loss`. Foca unicamente em aprender a dinâmica de eventos extremos e raros.
+
+O porquê desta arquitetura: Redes neurais tradicionais tendem a suavizar (subestimar) 
+picos extremos ao tentar minimizar o erro médio. Ao separar a aprendizagem 
+em duas cabeças isoladas, o modelo captura perfeitamente a variabilidade do 
+clima regular, mas também possui uma "especialidade" em extremos. Durante 
+a inferência, se a previsão da cabeça normal indicar uma rajada além do limiar, 
+o modelo chaveia a resposta e substitui a saída final pela previsão da cabeça extrema.
+
 Gestão de dados
 ---------------
 Os datasets NetCDF e shapefiles são armazenados no volume

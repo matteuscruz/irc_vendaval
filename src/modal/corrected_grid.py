@@ -70,7 +70,7 @@ image = (
         "MPLBACKEND": "Agg",
         "PYTHONUNBUFFERED": "1",
         # "NetCDF: HDF error" ao abrir o MESMO .nc mais de uma vez no mesmo
-        # processo (aqui: INMET_Stratified.nc via NetCDFLoader e de novo via
+        # processo (aqui: dados do INMET (y) via NetCDFLoader e de novo via
         # _load_direction_stations) — o locking padrão do HDF5 não convive
         # bem com o volume do Modal (FUSE, filesystem de rede).
         "HDF5_USE_FILE_LOCKING": "FALSE",

@@ -1,7 +1,7 @@
 # IRC Vendaval — Correção de Viés de Rajadas de Vento Extremo
 
 Bias correction de `daily_wind_gust_max` do ERA5 em relação a observações INMET,
-estratificado em **6 clusters espaciais**. Foco em eventos extremos de vento (vendavais).
+estratificado em **14 clusters espaciais**. Foco em eventos extremos de vento (vendavais).
 
 ---
 
@@ -22,8 +22,10 @@ estratificado em **6 clusters espaciais**. Foco em eventos extremos de vento (ve
 > ```
 > cluster_gan  →  cluster_lazy (com --synthetic-csv --n-neighbor-clusters 1 --eval-window monthly)
 > ```
-> A GAN gera dados sintéticos de extremos; o LazyPredict avalia 30+ modelos por cluster
-> usando 27 features, dados de clusters vizinhos e avaliação por janelas de deploy (mensal/quinzenal).
+> A GAN gera dados sintéticos de extremos; o LazyPredict avalia dezenas de modelos por cluster
+> usando as features atuais, dados de clusters vizinhos e avaliação por janelas de deploy
+> (mensal/quinzenal). Para a rede neural principal, o caminho ativo é `cluster_lstm`
+> com a variante padrão `cluster_dual_head_lstm`.
 
 ---
 
@@ -47,9 +49,10 @@ feature (apenas como target no treino).
 
 | Arquivo | Descrição |
 |---------|-----------|
-| `dataset/raw/INMET_Stratified.nc` | Rajada máxima diária observada — 30 estações, 2000–2023 |
-| `dataset/raw/ERA5_Stratified.nc` | Reanálise ERA5 co-localizada nas estações — agregação diária |
-| `dataset/shp/shp_vento.shp` | Polígonos dos 6 clusters espaciais (spatial join) |
+| `dataset/raw/Training_Dataset_INMET_ERA5_Paired.csv` | Fonte upstream do par INMET/ERA5 usada para gerar a base operacional do projeto |
+| `dataset/raw/INMET_Stratified.nc` | Rajada observada do INMET em formato estratificado para o treino da pipeline |
+| `dataset/raw/ERA5_Stratified.nc` | Reanálise ERA5 co-localizada em formato diário para as features de entrada |
+| `dataset/shp/shp_vento.shp` | Polígonos dos 14 clusters espaciais (spatial join) |
 
 O dataset é compartilhado via Modal Volume `irc-vendaval-dataset`. O upload ocorre
 automaticamente na primeira execução de qualquer pipeline Modal.
@@ -58,29 +61,34 @@ automaticamente na primeira execução de qualquer pipeline Modal.
 
 | Split | Período | Uso |
 |-------|---------|-----|
-| **Treino** | 2000–2022 | Fit do modelo (`cluster_lazy`) / 2000–2020 (`mlp_pytorch`) |
-| **Validação** | 2023 | Avaliação do `cluster_lazy` — por janelas mensais/quinzenais |
-| **Val / Teste** | 2021–2022 / 2023 | Early stopping e teste final do `mlp_pytorch` |
+| **Treino** | 2008–2018 | Fit dos modelos atuais (`cluster_lstm`, `cluster_mlp`, `cluster_lazy`) |
+| **Validação** | 2019 | Early stopping / seleção de hiperparâmetros, dependendo da pipeline |
+| **Teste** | 2020–2025 | Avaliação final das pipelines atuais |
 
 > No `cluster_lazy` a validação é avaliada por **janelas de deploy** (mensal ou quinzenal)
 > com `--eval-window`, refletindo o cenário real de inferência mensal/quinzenal.
 
 ### Features utilizadas (27 no total)
 
-| Grupo | Features |
-|-------|---------|
-| Vento | `10m_u/v_component_of_wind`, `wind_mag`, `wind_mag_max`, `wind_mag_min`, `wind_mag_std` |
-| Direção do vento | `wind_dir_sin`, `wind_dir_cos` (arctan2 do vetor U/V codificado ciclicamente) |
-| Convecção | `gust_factor` (pico/média intradiária — proxy convectivo) |
-| Persistência | `lag1_wind_mag_max`, `lag2_wind_mag_max`, `lag3_wind_mag_max`, `lag7_wind_mag_max` |
-| Tendência | `rolling7d_wind_mag_max` (média móvel 7 dias — evolução sinótica) |
-| Termodinâmica | `2m_temperature`, `2m_dewpoint_temperature`, `relative_humidity`, `t2m_range` |
-| Pressão | `surface_pressure`, `pressure_tendency` |
-| Precipitação | `total_precipitation` |
-| Sazonalidade | `day_sin`, `day_cos` |
-| Climatologia ERA5 | `era5_clim_wind` (média histórica do `wind_mag_max` por dia-do-ano) |
-| Localização | `latitude`, `longitude` (coordenadas da estação) |
-| Climatologia INMET* | `gust_P50` (mediana observada por estação, calculada só no treino — sem leakage) |
+Legenda:
+- **ERA5 bruto**: variável vinda diretamente do NetCDF/ERA5.
+- **Derivada na pipeline**: calculada a partir de ERA5, tempo ou histórico do treino.
+- **Meta da estação**: valor fixo por estação/cluster usado como contexto.
+
+| Grupo | Tipo | Features |
+|-------|------|---------|
+| Vento | ERA5 bruto | `10m_u/v_component_of_wind`, `wind_mag`, `wind_mag_max`, `wind_mag_min`, `wind_mag_std` |
+| Direção do vento | Derivada na pipeline | `wind_dir_sin`, `wind_dir_cos` (arctan2 do vetor U/V codificado ciclicamente) |
+| Convecção | Derivada na pipeline | `gust_factor` (pico/média intradiária — proxy convectivo) |
+| Persistência | Derivada na pipeline | `lag1_wind_mag_max`, `lag2_wind_mag_max`, `lag3_wind_mag_max`, `lag7_wind_mag_max` |
+| Tendência | Derivada na pipeline | `rolling7d_wind_mag_max` (média móvel 7 dias — evolução sinótica) |
+| Termodinâmica | ERA5 bruto | `2m_temperature`, `2m_dewpoint_temperature`, `relative_humidity`, `t2m_range` |
+| Pressão | ERA5 bruto | `surface_pressure`, `pressure_tendency` |
+| Precipitação | ERA5 bruto | `total_precipitation` |
+| Sazonalidade | Derivada na pipeline | `day_sin`, `day_cos` |
+| Climatologia ERA5 | Derivada na pipeline | `era5_clim_wind` (média histórica do `wind_mag_max` por dia-do-ano) |
+| Localização | Meta da estação | `latitude`, `longitude` (coordenadas da estação) |
+| Climatologia INMET* | Derivada na pipeline | `gust_P50` (mediana observada por estação) |
 
 \* `gust_P50` é calculado em runtime a partir do split de treino; amostras sintéticas recebem a mediana do cluster.
 
@@ -88,16 +96,24 @@ automaticamente na primeira execução de qualquer pipeline Modal.
 
 ## 3. Clusters Espaciais
 
-6 regiões climáticas definidas por shapefile, com regimes distintos de vento:
+14 regiões climáticas definidas por shapefile, com regimes distintos de vento:
 
 | Cluster | Estações | Característica |
 |---------|----------|----------------|
-| C1 | 5 | Litoral sul |
-| C2 | 8 | Planalto gaúcho |
-| C3 | 3 | Serra catarinense |
-| C4 | 10 | Interior RS/SC |
-| C5 | 3 | Planalto central SC |
-| C6 | 1 | Região de transição |
+| C1 | 9 | Partição geográfica do shapefile |
+| C2 | 16 | Partição geográfica do shapefile |
+| C3 | 21 | Partição geográfica do shapefile |
+| C4 | 31 | Partição geográfica do shapefile |
+| C5 | 22 | Partição geográfica do shapefile |
+| C6 | 16 | Partição geográfica do shapefile |
+| C7 | 9 | Partição geográfica do shapefile |
+| C8 | 15 | Partição geográfica do shapefile |
+| C9 | 44 | Partição geográfica do shapefile |
+| C10 | 32 | Partição geográfica do shapefile |
+| C11 | 16 | Partição geográfica do shapefile |
+| C12 | 19 | Partição geográfica do shapefile |
+| C13 | 10 | Partição geográfica do shapefile |
+| C14 | 11 | Partição geográfica do shapefile |
 
 Cada pipeline treina um modelo independente por cluster, preservando os
 regimes meteorológicos distintos.
@@ -122,7 +138,7 @@ também a variante **TRWindBC** com condicionamento por features estáticas
 de estação (lat, lon, percentis de rajada).
 
 ### 4.3 Screening LazyPredict (`cluster_lazy`)
-30+ modelos sklearn avaliados por cluster, com as seguintes capacidades:
+LazyPredict avalia dezenas de modelos sklearn por cluster, com as seguintes capacidades:
 
 **Feature engineering completo (27 features):** o pipeline usa o conjunto expandido de features descrito na seção 2, incluindo direção do vento, lags longos, rolling stats e a climatologia observada por estação (`gust_P50`).
 
@@ -172,65 +188,48 @@ modal run src/modal/gan_hparam.py --n-trials 30 --extreme  # avalia só na cauda
 Melhor resultado encontrado: Wasserstein = 0.0201 com `z_dim=16`, `hidden_dim=128`,
 `c_lambda=5.0`, `crit_repeats=5`, `lr=5e-5`.
 
-### 4.6 GAN de Augmentation completo (`gan_augment`) — vetor features + target
-GAN condicional por cluster para gerar o vetor completo `[features ERA5 + target]`:
+### 4.6 GAN de Augmentation completo (`cluster_gan`)
+Essa pipeline segue ativa como geradora de dados sintéticos usados pelos modelos
+subsequentes. Ela produz o vetor completo `[features ERA5 + target]`:
 - Treina na distribuição completa (features ERA5 + target INMET)
 - Gera apenas amostras acima do P90 via rejection sampling
 - `n_per_cluster_ratio`: número de sintéticos proporcional ao tamanho real
   do cluster — evita dominância de dados sintéticos em clusters pequenos
 - Sanity check automático: compara P90/P95 real × sintético por cluster
 
-### 4.6 MLP PyTorch com Pinball Loss (`mlp_pytorch`) — atual
-Migração de sklearn para PyTorch para suportar loss customizada:
-- **Pinball loss** no quantil τ: penaliza `τ × (sub-estimativa)` e
-  `(1-τ) × (sobre-estimativa)` — com τ=0.9 sub-estimativas custam 9× mais
-- **BatchNorm + Dropout** por camada — regularização mais eficaz que L2 puro
-- **ReduceLROnPlateau** — learning rate adaptativo quando validação estagna
-- **Early stopping** com restauração do melhor estado
-- Pesos salvos por cluster (`model_cluster_N.pt`) para reutilização
+### 4.6 Estado atual da pilha de treino
+Hoje o código expõe três famílias principais de treino por cluster:
+- `cluster_lstm`: LSTM dual-head em Keras/TensorFlow, com a configuração de produção `cluster_dual_head_lstm`.
+- `cluster_mlp`: `MLPRegressor` do scikit-learn com reamostragem/weighting dos extremos e alvo em razão `INMET/ERA5`.
+- `cluster_lazy`: benchmark automático com LazyPredict, que seleciona o melhor regressor por cluster e salva o campeão para inferência espacial.
 
 ---
 
-## 5. Pipeline Atual — MLP PyTorch
+## 5. Pipeline Atual
 
-### Arquitetura
+### `cluster_lstm`
 
-```
-Features ERA5 (20)
-       │
-  [Linear → BatchNorm → ReLU → Dropout] × N camadas
-       │
-  [Linear → scalar]
-       │
-  razão predita × ERA5_wind_mag_max = ŷ_corrigido (m/s)
-```
+Arquitetura principal em produção:
+- LSTM com duas cabeças de saída.
+- Cabeça normal com Huber loss.
+- Cabeça extrema com `robust_extreme_loss`.
+- Variante `cluster_tr_lstm` disponível no código para duas entradas, mas não é a configuração padrão de produção.
+- A feature engineering é obrigatória na pipeline; o que é configurável são os grupos de features (`feature_groups`) e o recorte de cobertura (`restrict_coverage`).
 
-### Loss: Pinball (Quantile Loss)
+### `cluster_mlp`
 
-```
-L(ŷ, y; τ) = mean[ τ·max(y−ŷ, 0)  +  (1−τ)·max(ŷ−y, 0) ]
-```
+Pipeline de baseline supervisionado com `MLPRegressor`:
+- Pré-processamento com imputação por média e `RobustScaler`.
+- Alvo treinado como razão `INMET/ERA5`.
+- Reamostragem dos eventos extremos por `extreme_power`.
+- Inferência espacial salva o artefato com `target_kind: ratio`.
 
-Com τ=0.9: sub-estimativas pesam 9× mais que sobre-estimativas.
-Isso direciona o modelo a não ignorar os extremos.
+### `cluster_lazy`
 
-### Artefatos gerados por experimento
-
-```
-artifacts/mlp_pytorch/expN/
-  plots/
-    per_cluster/
-      loss_curve_{C}.png          # curva treino vs validação
-      scatter_obs_pred_{C}.png    # scatter treino | validação | teste
-    summary/
-      metrics_R2.png              # R² por cluster × split
-      metrics_rmse_p90.png
-      metrics_bias_p90.png
-  csv/
-    mlp_pytorch_results.csv       # métricas de todos os clusters e splits
-  model_cluster_{C}.pt            # pesos PyTorch por cluster
-  run_meta.json                   # hiperparâmetros e metadados do experimento
-```
+Pipeline de benchmark e seleção do melhor modelo por cluster:
+- `LazyRegressor` com filtragem dos estimadores muito lentos.
+- Escolha do melhor modelo por métrica no conjunto de validação.
+- Salvamento do campeão por cluster para a etapa de inferência espacial.
 
 ---
 
@@ -277,42 +276,16 @@ Todos os pipelines são invocados através de um único `main.py` com subcomando
 
 ```bash
 python main.py --help
-# lista: lstm_baseline, cluster_lstm, cluster_mlp, cluster_lazy,
-#        cluster_gan, gan_augment, mlp_pytorch
+# lista: cluster_lstm, cluster_mlp, cluster_lazy,
+#        cluster_gan, corrected_grid
 ```
 
-### MLP PyTorch (`mlp_pytorch`)
+### LSTM por cluster (`cluster_lstm`)
 
 ```bash
-# Sem augmentation
-python main.py mlp_pytorch \
-    --output-dir artifacts/mlp_pytorch \
-    --hidden-layers 128,64,32 \
-    --tau 0.9 \
-    --dropout 0.2 \
-    --weight-decay 0.01 \
-    --max-epochs 500
-
-# Com augmentation GAN
-python main.py mlp_pytorch \
-    --output-dir artifacts/mlp_pytorch \
-    --hidden-layers 128,64,32 \
-    --tau 0.9 \
-    --synthetic-csv artifacts/gan_augment/expN/synthetic_augment.csv
+python main.py cluster_lstm \
+  --config config/experiment_cluster_lstm_modal.yaml
 ```
-
-| Parâmetro | Default | Descrição |
-|-----------|---------|-----------|
-| `--hidden-layers` | `128,64,32` | Camadas ocultas separadas por vírgula |
-| `--tau` | `0.9` | Quantil da pinball loss (0.5=mediana, 0.9=extremos) |
-| `--dropout` | `0.2` | Dropout por camada |
-| `--weight-decay` | `0.01` | L2 no otimizador Adam |
-| `--lr` | `1e-3` | Learning rate inicial |
-| `--max-epochs` | `500` | Máximo de épocas |
-| `--patience` | `30` | Épocas sem melhora antes do early stopping |
-| `--batch-size` | `256` | Tamanho do batch |
-| `--synthetic-csv` | `None` | CSV de augmentation gerado pela GAN |
-| `--exp-name` | auto (`expN`) | Nome do experimento |
 
 ### MLP sklearn com Extreme Weighting (`cluster_mlp`)
 
@@ -334,30 +307,28 @@ modal run src/modal/cluster_mlp.py \
 modal run src/modal/cluster_mlp.py --only-download
 ```
 
-### GAN Augmentation (`gan_augment`)
+### Lazy benchmark (`cluster_lazy`)
 
 ```bash
-# Local (CPU, para testar)
-python main.py gan_augment \
-    --output-dir artifacts/gan_augment \
-    --epochs 300 \
-    --n-per-cluster-ratio 0.3 \
-    --exp-name exp_local
+python main.py cluster_lazy \
+  --output-dir artifacts/lazy_clusters \
+  --n-neighbor-clusters 1 \
+  --eval-window monthly
+```
 
-# Na nuvem com GPU T4 (recomendado)
-modal run src/modal/gan_augment.py \
-    --epochs 300 \
-    --n-per-cluster-ratio 0.3
+### GAN de augmentation (`cluster_gan`)
 
-# Só baixar artefatos de run anterior
-modal run src/modal/gan_augment.py --only-download \
-    --local-dir artifacts/gan_augment_modal
+```bash
+python main.py cluster_gan \
+  --output-dir artifacts/gan_clusters \
+  --epochs 300 \
+  --extreme-percentile 90.0
 ```
 
 | Flag | Default | Descrição |
 |------|---------|-----------|
 | `--epochs` | `300` | Épocas de treino da GAN |
-| `--z-dim` | `32` | Dimensão do ruído latente do Generator |
+| `--extreme-percentile` | `90.0` | Percentil para definir os extremos |
 | `--hidden-dim` | `128` | Largura das camadas do Generator e Critic |
 | `--crit-repeats` | `5` | Passos do Critic por passo do Generator (WGAN-GP) |
 | `--c-lambda` | `10.0` | Peso do gradient penalty |
@@ -369,7 +340,7 @@ modal run src/modal/gan_augment.py --only-download \
 | `--exp-name` | auto (`expN`) | Nome do experimento |
 
 > **Importante:** use sempre `--n-per-cluster-ratio` em vez de `--n-per-cluster`.
-> A versão fixa pode fazer clusters pequenos (ex: C6 com 1 estação) serem dominados
+> A versão fixa pode fazer clusters pequenos serem dominados
 > por sintéticos, degradando o treino.
 
 ### LSTM Dual-Head por Cluster (`cluster_lstm`)
@@ -478,22 +449,18 @@ irc_vendaval/
 │
 ├── src/
 │   ├── modal/                      # Entrypoints Modal (1 por pipeline)
-│   │   ├── lstm_baseline.py        # modal run src/modal/lstm_baseline.py
 │   │   ├── cluster_lstm.py         # modal run src/modal/cluster_lstm.py
 │   │   ├── cluster_mlp.py          # modal run src/modal/cluster_mlp.py
 │   │   ├── cluster_lazy.py         # modal run src/modal/cluster_lazy.py (fan-out)
 │   │   ├── cluster_gan.py          # modal run src/modal/cluster_gan.py
-│   │   ├── gan_augment.py          # modal run src/modal/gan_augment.py (GPU T4)
-│   │   └── mlp_pytorch.py          # modal run src/modal/mlp_pytorch.py (GPU T4)
+│   │   └── corrected_grid.py       # modal run src/modal/corrected_grid.py
 │   ├── pipelines/                  # Lógica de cada pipeline
 │   │   ├── common.py               # Constantes, splits e utils compartilhados
-│   │   ├── lstm_baseline.py        # Subcomando: lstm_baseline
 │   │   ├── cluster_lstm.py         # Subcomando: cluster_lstm
 │   │   ├── cluster_mlp.py          # Subcomando: cluster_mlp
 │   │   ├── cluster_lazy.py         # Subcomando: cluster_lazy
 │   │   ├── cluster_gan.py          # Subcomando: cluster_gan
-│   │   ├── gan_augment.py          # Subcomando: gan_augment (GANConfig aqui)
-│   │   └── mlp_pytorch.py          # Subcomando: mlp_pytorch (WindGustMLP aqui)
+│   │   └── corrected_grid.py       # Subcomando: corrected_grid
 │   ├── data/
 │   │   ├── netcdf_loader.py        # Carrega e agrega INMET + ERA5 para diário
 │   │   ├── cluster_assigner.py     # Spatial join estação → cluster
@@ -519,18 +486,17 @@ irc_vendaval/
 │   └── visualization/
 │       └── cluster_plots.py
 │
-├── config/                         # YAMLs de experimento (cluster_lstm / lstm_baseline)
+├── config/                         # YAMLs de experimento (cluster_lstm / cluster_tr_lstm)
 │
 ├── dataset/
 │   ├── raw/                        # NetCDF: INMET + ERA5
-│   └── shp/                        # Shapefiles dos 6 clusters
+│   └── shp/                        # Shapefiles dos 14 clusters
 │
 ├── artifacts/
-│   ├── mlp_pytorch/                # Saída do mlp_pytorch
 │   ├── mlp_clusters/               # Saída do cluster_mlp
 │   ├── lazy_clusters/              # Saída do cluster_lazy
 │   ├── gan_clusters/               # Saída do cluster_gan
-│   └── gan_augment/                # Dados sintéticos da cWGAN-GP
+│   └── corrected_grid/             # NetCDFs corrigidos
 │
 ├── irc_vendaval_dashboard/         # Dashboard Streamlit de comparação
 └── test/                           # Testes unitários (pytest)

@@ -6,7 +6,7 @@ Descrição:
     do INMET e o modelo de reanálise ERA5.
     
     Responsabilidades:
-    1. Carregar dados brutos do INMET (NetCDF) e ERA5.
+    1. Carregar os dados do INMET (y) e do ERA5 (x).
     2. Construir índices espaciais (KDTree) para localizar vizinhos e pontos de grade.
     3. Preencher lacunas (gap-filling) na rajada do INMET usando vizinhos próximos.
     4. Consolidar métricas de magnitude e direção em um CSV tabular.

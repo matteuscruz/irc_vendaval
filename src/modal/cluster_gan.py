@@ -5,6 +5,22 @@ Executa a pipeline cluster_gan (WGAN-GP condicional + EVT/GPD +
 nearest-neighbor) na nuvem (Modal) para gerar dados sintéticos de rajadas
 extremas, e baixa o synthetic_augment.csv resultante.
 
+Arquitetura do Modelo e Metodologia ExGAN
+-----------------------------------------
+1. Teoria dos Valores Extremos (EVT / GPD): As rajadas acima do percentil extremo
+   (P90 padrão) são ajustadas a uma Generalized Pareto Distribution (GPD).
+2. Distribution Shifting: k rodadas de corte e geração auxiliar deslocam a
+   distribuição do dataset de treino para a cauda extrema, evitando que o
+   gerador sofra com o desbalanceamento onde 90% dos dados têm condição nula.
+3. Conditional WGAN-GP Alvo-Only:
+   - Condição: One-hot de cluster + Season opcional + Excedência normalizada GPD.
+   - Gerador: Dense(128, ELU) -> Dense(128, ELU) -> Dense(1) [prediz rajada escalar].
+   - Crítico: Dense(128, ELU) -> Dense(64, ELU) -> Dense(1) [Wasserstein score].
+   - Perda combinada: WGAN Wasserstein + Gradient Penalty (λ=10) + L_ext (λ=5, erro relativo do extremo).
+4. Pareamento de Features por Nearest-Neighbor: O alvo sintético y_synth gerado
+   recebe o vetor de covariáveis meteorológicas do evento real mais próximo,
+   preservando correlações físicas e atmosféricas perfeitamente plausíveis.
+
 Uso
 ---
 # Rodar e baixar o CSV sintético (default)
