@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="figs/header.png" alt="IRC Vendaval" width="100%">
+  <img src="figs/extreme_winds.png" alt="IRC Vendaval" width="100%">
 </p>
 
 # IRC Vendaval — Correção de Viés de Rajadas de Vento Extremo
