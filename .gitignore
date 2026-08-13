@@ -11,7 +11,6 @@ build/
 # uv
 .venv/
 .python-version
-uv.lock
 
 # Testing
 .pytest_cache/
@@ -38,6 +37,7 @@ research/TRWindBC/
 # IDE
 .vscode/
 .idea/
+.sonarlint/
 
 # OS
 .DS_Store
