@@ -16,6 +16,7 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+catboost_info/
 
 # Artifacts and data (keep directory structure, ignore content) — resultados
 # de treino (lazy_modal/mlp_modal/modal/gan_modal/corrected_grid/...) são

@@ -34,22 +34,5 @@ jobs:
       - name: Instalar dependências (extra "dev" — pytest/pytest-cov)
         run: uv sync --extra dev
 
-      # Os --ignore abaixo são débito técnico PRÉ-EXISTENTE, não relacionado
-      # a nenhuma mudança recente: test_gan_*.py/test_nn_model.py importam
-      # módulos que não existem mais no repo (src.gan, src.models.nn_model);
-      # test_convcnn_model.py/test_convrnn_model.py referenciam símbolos
-      # (CLSTM_cell etc.) não definidos nos módulos atuais. Ignorados aqui
-      # pra manter o CI verde e útil pra pegar REGRESSÕES novas — remover
-      # cada --ignore assim que o teste/módulo correspondente for corrigido.
       - name: Rodar pytest
-        run: >
-          uv run pytest test/ -v
-          --ignore=test/test_gan_conditioning.py
-          --ignore=test/test_gan_evaluate.py
-          --ignore=test/test_gan_joint.py
-          --ignore=test/test_gan_losses.py
-          --ignore=test/test_gan_sampling.py
-          --ignore=test/test_gan_train.py
-          --ignore=test/test_nn_model.py
-          --ignore=test/test_convcnn_model.py
-          --ignore=test/test_convrnn_model.py
+        run: uv run pytest test/ -v
