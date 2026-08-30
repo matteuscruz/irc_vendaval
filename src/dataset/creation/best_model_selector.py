@@ -9,6 +9,7 @@ pra ler os artefatos deste repo em vez do parquet sincronizado do dashboard.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,8 @@ import numpy as np
 import pandas as pd
 
 from src.pipelines.common import compute_metrics, month_to_season
+
+_MODEL_STEM_RE = re.compile(r"^best_model_c(\d+)(?:_(DJF|MAM|JJA|SON))?$")
 
 PIPELINES = ["lazy", "mlp", "lstm"]
 ARMS = ["original", "synthetic", "newfeatures", "all", "basin", "all_basin"]
@@ -67,22 +70,29 @@ class Combo:
     def preds_by_station(self) -> Path:
         return self.dir / "predictions" / "predictions_by_station.csv"
 
-    def available_clusters(self) -> set[int]:
-        """Clusters com modelo salvo (.joblib pra lazy/mlp, .keras pro lstm)
-        — `newfeatures` e `all`(lstm) só têm modelo pra 5-6 clusters, por
-        causa do `--restrict-coverage` (estações fora da cobertura
-        era5_18z/bt55 são descartadas antes do treino)."""
+    def available_cluster_seasons(self) -> set[tuple[int, str | None]]:
+        """(cluster_id, season) com modelo salvo — season=None é o modelo
+        pooled (ano inteiro; sempre o caso pra mlp/lstm, que não gravam
+        arquivo por trimestre). Parseia só o nome do arquivo (sem
+        joblib.load) por velocidade — roda a cada winner table. `newfeatures`
+        e `all`(lstm) só têm modelo pra 5-6 clusters, por causa do
+        `--restrict-coverage` (estações fora da cobertura era5_18z/bt55 são
+        descartadas antes do treino)."""
         if not self.models_dir.exists():
             return set()
         stems = [p.stem for p in self.models_dir.glob("best_model_c*.joblib")]
         stems += [p.stem for p in self.models_dir.glob("best_model_c*.keras")]
-        out: set[int] = set()
+        out: set[tuple[int, str | None]] = set()
         for s in stems:
-            try:
-                out.add(int(s.replace("best_model_c", "")))
-            except ValueError:
+            m = _MODEL_STEM_RE.match(s)
+            if not m:
                 continue
+            out.add((int(m.group(1)), m.group(2)))
         return out
+
+    def available_clusters(self) -> set[int]:
+        """Clusters com pelo menos um modelo salvo (qualquer trimestre)."""
+        return {cid for cid, _ in self.available_cluster_seasons()}
 
 
 def _to_int_cluster(cid) -> int | None:
@@ -169,6 +179,16 @@ def derive_quarterly_from_predictions(combo: Combo, results: pd.DataFrame) -> pd
 
     preds = load_station_predictions(combo)
     if preds.empty or "time" not in preds.columns:
+        return pd.DataFrame()
+    if "split" not in preds.columns:
+        # predictions_by_station.csv de um schema mais antigo (sem coluna
+        # 'split') — não dá pra derivar season×split com confiança; pula
+        # esse combo em vez de derrubar o winner table inteiro.
+        print(
+            f"[best_model_selector] AVISO: {combo.pipeline}/{combo.arm} — "
+            "predictions_by_station.csv sem coluna 'split', pulando derivação "
+            "de trimestre pra esse combo."
+        )
         return pd.DataFrame()
     preds = preds.copy()
     preds["season"] = month_to_season(preds["time"].dt.month)
@@ -333,12 +353,18 @@ def apply_fitted_model_fallback(
 
     for idx, row in table.iterrows():
         cid, season = row["cluster_id"], row["season"]
-        combo = combo_by_key.get((row["pipeline"], row["arm"]))
-        if combo is not None and cid in combo.available_clusters():
-            table.at[idx, "has_fitted_model"] = True
-            continue
-
         season_arg = None if season == "ALL" else season
+        combo = combo_by_key.get((row["pipeline"], row["arm"]))
+        if combo is not None:
+            avail = combo.available_cluster_seasons()
+            # Prefere o modelo específico do trimestre; cai pro pooled
+            # (season=None) só se não houver um por-trimestre salvo — cobre
+            # tanto lazy (que agora pode ter os dois) quanto mlp/lstm (que só
+            # têm pooled, já sempre presente em `avail` como (cid, None)).
+            if (cid, season_arg) in avail or (cid, None) in avail:
+                table.at[idx, "has_fitted_model"] = True
+                continue
+
         selected = (
             _select_split(resolve_all_season(results)) if season_arg is None
             else _select_split(results[results["season"] == season_arg])
@@ -349,7 +375,10 @@ def apply_fitted_model_fallback(
         found = False
         for _, cand in ranked.iterrows():
             cand_combo = combo_by_key.get((cand["pipeline"], cand["arm"]))
-            if cand_combo is not None and cid in cand_combo.available_clusters():
+            if cand_combo is None:
+                continue
+            cand_avail = cand_combo.available_cluster_seasons()
+            if (cid, season_arg) in cand_avail or (cid, None) in cand_avail:
                 table.at[idx, "pipeline"] = cand["pipeline"]
                 table.at[idx, "arm"] = cand["arm"]
                 table.at[idx, "metric_value"] = float(cand[metric])

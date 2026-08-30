@@ -5,8 +5,6 @@ import numpy as np
 from src.pipeline.augmentation.base import BaseAugmenter
 from src.pipeline.data.cluster_preprocessor import SEASONS, ClusterDataBatch
 
-_N_BASE = 7   # features ERA5 (indices 0:7); cluster one-hot em 7:
-
 
 class ExGANAugmenter(BaseAugmenter):
     """
@@ -32,6 +30,7 @@ class ExGANAugmenter(BaseAugmenter):
         hidden_units: int = 256,
         epochs: int = 200,
         batch_size: int = 64,
+        steps_per_epoch: int = 150,
         n_critic: int = 5,
         lambda_gp: float = 10.0,
         lambda_y: float = 0.5,
@@ -42,6 +41,8 @@ class ExGANAugmenter(BaseAugmenter):
         tau: float | None = None,
         use_bias_correction: bool = False,
         n_quantiles: int = 100,
+        checkpoint_dir: str | None = None,
+        checkpoint_every: int = 25,
     ) -> None:
         super().__init__(
             extreme_percentile=extreme_percentile,
@@ -51,6 +52,7 @@ class ExGANAugmenter(BaseAugmenter):
         self.hidden_units = hidden_units
         self.epochs = epochs
         self.batch_size = batch_size
+        self.steps_per_epoch = steps_per_epoch
         self.n_critic = n_critic
         self.lambda_gp = lambda_gp
         self.lambda_y = lambda_y
@@ -61,6 +63,8 @@ class ExGANAugmenter(BaseAugmenter):
         self.tau = tau
         self.use_bias_correction = use_bias_correction
         self.n_quantiles = n_quantiles
+        self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_every = checkpoint_every
 
         self._generator = None
         self._bias_corrector: object = None
@@ -70,6 +74,7 @@ class ExGANAugmenter(BaseAugmenter):
         self._threshold: float = 0.0
         self._lookback: int = 7
         self._n_features: int = 13
+        self._n_base: int = 7
         self._n_clusters: int = 6
         self._cond_dim: int = 11
 
@@ -77,6 +82,7 @@ class ExGANAugmenter(BaseAugmenter):
 
     def fit_augment(self, data: ClusterDataBatch) -> ClusterDataBatch:
         import tensorflow as tf
+        from src.pipeline.augmentation import checkpoint as ckpt
         from src.pipeline.data.bias_corrector import ERA5BiasCorrector
 
         # Correção de viés ERA5→INMET antes do pool (fit no treino)
@@ -89,6 +95,11 @@ class ExGANAugmenter(BaseAugmenter):
             )
 
         self._feature_names_cache = list(data.feature_names)
+        # Colunas one-hot de cluster ocupam feature_names[n_base:] — ver
+        # ClusterPreprocessor (feature_names = avail_features + cluster_cols).
+        # NÃO pode ser uma constante fixa: avail_features varia com
+        # feature_groups (hoje dezenas de colunas, não as 7 originais).
+        self._n_base = len(data.feature_names) - len(data.cluster_ids)
 
         X_all, y_all, season_labels = self._pool(data)
 
@@ -116,21 +127,34 @@ class ExGANAugmenter(BaseAugmenter):
             f"GPD (original): xi={self._gpd_shape:.3f}, "
             f"sigma={self._gpd_scale:.3f}, threshold={self._threshold:.3f}"
         )
-        print(
-            f"[ExGAN] Iniciando distribution shifting "
-            f"(k={self.k_shift}, c={self.c_shift})..."
-        )
 
-        # Passo 2: Distribution Shifting
-        X_shifted, y_shifted, orig_indices = self._distribution_shifting(
-            X_all, y_all, tf
-        )
+        # Checkpoint/resume: se um run anterior já terminou o treino final
+        # (marcado "done" no state.json), pula shifting + treino inteiros e
+        # só recarrega o gerador salvo — evita retreinar do zero depois de
+        # um timeout/crash que aconteceu DEPOIS do treino já ter terminado
+        # (ex.: numa etapa posterior do pipeline).
+        state = ckpt.load_state(self.checkpoint_dir)
+        if state.get("done"):
+            print("[ExGAN] Checkpoint indica treino já concluído — pulando shifting e treino final.")
+            generator = self._build_generator(tf)
+            ckpt.load_weights_if_present(self.checkpoint_dir, "final_generator", generator)
+            self._generator = generator
+        else:
+            print(
+                f"[ExGAN] Iniciando distribution shifting "
+                f"(k={self.k_shift}, c={self.c_shift})..."
+            )
 
-        # Passo 4: Conditional GAN no dataset deslocado
-        cond_shifted = self._build_condition_shifted(
-            X_shifted, y_shifted, orig_indices, season_labels, data.cluster_ids
-        )
-        self._train(X_shifted, y_shifted, cond_shifted, tf)
+            # Passo 2: Distribution Shifting
+            X_shifted, y_shifted, orig_indices = self._distribution_shifting(
+                X_all, y_all, tf, self.checkpoint_dir
+            )
+
+            # Passo 4: Conditional GAN no dataset deslocado
+            cond_shifted = self._build_condition_shifted(
+                X_shifted, y_shifted, orig_indices, season_labels, data.cluster_ids
+            )
+            self._train(X_shifted, y_shifted, cond_shifted, tf, self.checkpoint_dir)
 
         # Passo 5: Gerar sintéticos via GPD (ou GPD inverse se tau definido)
         n_ext_orig = int(np.sum(y_all.flatten() > self._threshold))
@@ -196,17 +220,37 @@ class ExGANAugmenter(BaseAugmenter):
         X_all: np.ndarray,
         y_all: np.ndarray,
         tf,
+        checkpoint_dir: str | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         k iteracoes: cortar c% menos extremos, treinar GAN auxiliar, repetir.
+
+        Checkpoint por rodada: cada rodada de shifting leva minutos (não
+        horas), então o granularidade "rodada completa" é suficiente — não
+        checkpointa dentro de uma rodada. Ao retomar, rodadas já completas
+        (round_idx no state.json) são puladas, carregando o array já
+        deslocado salvo em disco em vez de recomeçar do zero.
         """
-        X_cur = X_all.copy().astype("float32")
-        y_cur = y_all.copy().astype("float32")
-        orig_indices = np.arange(len(X_all))
+        from src.pipeline.augmentation import checkpoint as ckpt
+
+        state = ckpt.load_state(checkpoint_dir)
+        start_round = int(state.get("round_idx", 0))
+        saved = (
+            ckpt.load_arrays_if_present(checkpoint_dir, "shift_progress")
+            if start_round > 0 else None
+        )
+        if saved is not None:
+            X_cur, y_cur, orig_indices = saved["X_cur"], saved["y_cur"], saved["orig_indices"]
+            print(f"[ExGAN] Checkpoint: retomando shifting da rodada {start_round + 1}/{self.k_shift}.")
+        else:
+            X_cur = X_all.copy().astype("float32")
+            y_cur = y_all.copy().astype("float32")
+            orig_indices = np.arange(len(X_all))
+            start_round = 0
 
         aux_epochs = max(1, self.epochs // max(1, self.k_shift + 1))
 
-        for iteration in range(self.k_shift):
+        for iteration in range(start_round, self.k_shift):
             n = len(X_cur)
             order = np.argsort(y_cur.flatten())[::-1]  # mais extremos primeiro
             n_keep = max(self.batch_size * 2, int(n * (1.0 - self.c_shift)))
@@ -239,6 +283,21 @@ class ExGANAugmenter(BaseAugmenter):
                 f"y_max={y_cur.max():.3f}"
             )
 
+            ckpt.save_arrays(
+                checkpoint_dir, "shift_progress",
+                X_cur=X_cur, y_cur=y_cur, orig_indices=orig_indices,
+            )
+            ckpt.save_state(
+                checkpoint_dir,
+                {"round_idx": iteration + 1, "final_epoch": 0, "done": False},
+            )
+            # Print DEPOIS de salvar (não só o de progresso acima): o
+            # wrapper Modal reage a linhas novas de stdout pra decidir
+            # quando commitar o volume — precisa de uma linha depois do
+            # arquivo já estar gravado em disco.
+            if checkpoint_dir:
+                print(f"  [ExGAN] Checkpoint salvo (rodada {iteration + 1}/{self.k_shift}).")
+
         return X_cur, y_cur, orig_indices
 
     def _train_and_generate_aux(
@@ -253,7 +312,7 @@ class ExGANAugmenter(BaseAugmenter):
         n = len(X_kept)
         cond = np.zeros((n, self._cond_dim), dtype="float32")
         for j in range(n):
-            cluster_row = X_kept[j, -1, _N_BASE: _N_BASE + self._n_clusters]
+            cluster_row = X_kept[j, -1, self._n_base: self._n_base + self._n_clusters]
             cond[j, : self._n_clusters] = cluster_row
         # season e e_normalized = 0 (sem condicao na fase auxiliar)
 
@@ -262,48 +321,56 @@ class ExGANAugmenter(BaseAugmenter):
         opt_g = tf.keras.optimizers.Adam(self.learning_rate_g, beta_1=0.0)
         opt_d = tf.keras.optimizers.Adam(self.learning_rate_d, beta_1=0.0)
 
-        steps = max(1, n // self.batch_size)
+        # Passos compilados com @tf.function — mesmo motivo de
+        # tabular_gan_augmenter.py: em modo eager, o loop puro é inviável em
+        # datasets reais (centenas de milhares de amostras — travou 3h sem
+        # completar 1 época num run real no Modal antes desta correção).
+        @tf.function
+        def critic_step_aux(x_r, y_r, c_r, z):
+            with tf.GradientTape() as tape:
+                x_f, y_f = gen_aux([z, c_r], training=True)
+                s_real = crit_aux([x_r, y_r, c_r], training=True)
+                s_fake = crit_aux([x_f, y_f, c_r], training=True)
+                gp = self._gradient_penalty(crit_aux, x_r, y_r, x_f, y_f, c_r, tf)
+                loss_c = (
+                    tf.reduce_mean(s_fake) - tf.reduce_mean(s_real)
+                    + self.lambda_gp * gp
+                )
+            grads_c = tape.gradient(loss_c, crit_aux.trainable_variables)
+            opt_d.apply_gradients(zip(grads_c, crit_aux.trainable_variables))
+            return loss_c
+
+        @tf.function
+        def generator_step_aux(c_r, z):
+            with tf.GradientTape() as tape:
+                x_f, y_f = gen_aux([z, c_r], training=True)
+                s_fake = crit_aux([x_f, y_f, c_r], training=True)
+                loss_g = -tf.reduce_mean(s_fake)
+            grads_g = tape.gradient(loss_g, gen_aux.trainable_variables)
+            opt_g.apply_gradients(zip(grads_g, gen_aux.trainable_variables))
+            return loss_g
+
+        # steps_per_epoch é um hiperparâmetro fixo, não n // batch_size —
+        # treino adversarial por minibatch não tem noção de "época = 1
+        # passada pelos dados" (idx já é amostrado aleatoriamente a cada
+        # step); escalar steps com n faz o custo explodir em datasets reais
+        # (~10900 steps/época com 700 mil amostras, inviável mesmo
+        # compilado — travou 3h sem terminar 1 época num run real no Modal
+        # antes desta correção). Mesma convenção de tabular_gan_augmenter.py.
+        steps = self.steps_per_epoch
         for _ in range(aux_epochs):
             for _ in range(steps):
-                # Critic
                 for _ in range(self.n_critic):
                     idx = np.random.randint(0, n, self.batch_size)
-                    x_r = tf.constant(X_kept[idx])
-                    y_r = tf.constant(y_kept[idx])
-                    c_r = tf.constant(cond[idx])
-                    z = tf.random.normal([self.batch_size, self.latent_dim])
-                    with tf.GradientTape() as tape:
-                        x_f, y_f = gen_aux([z, c_r], training=True)
-                        s_real = crit_aux([x_r, y_r, c_r], training=True)
-                        s_fake = crit_aux([x_f, y_f, c_r], training=True)
-                        gp = self._gradient_penalty(
-                            crit_aux, x_r, y_r, x_f, y_f, c_r, tf
-                        )
-                        loss_c = (
-                            tf.reduce_mean(s_fake)
-                            - tf.reduce_mean(s_real)
-                            + self.lambda_gp * gp
-                        )
-                    grads_c = tape.gradient(
-                        loss_c, crit_aux.trainable_variables
+                    critic_step_aux(
+                        tf.constant(X_kept[idx]), tf.constant(y_kept[idx]),
+                        tf.constant(cond[idx]),
+                        tf.random.normal([self.batch_size, self.latent_dim]),
                     )
-                    opt_d.apply_gradients(
-                        zip(grads_c, crit_aux.trainable_variables)
-                    )
-                # Generator
                 idx = np.random.randint(0, n, self.batch_size)
-                z = tf.random.normal([self.batch_size, self.latent_dim])
-                with tf.GradientTape() as tape:
-                    x_f, y_f = gen_aux(
-                        [z, tf.constant(cond[idx])], training=True
-                    )
-                    s_fake = crit_aux(
-                        [x_f, y_f, tf.constant(cond[idx])], training=True
-                    )
-                    loss_g = -tf.reduce_mean(s_fake)
-                grads_g = tape.gradient(loss_g, gen_aux.trainable_variables)
-                opt_g.apply_gradients(
-                    zip(grads_g, gen_aux.trainable_variables)
+                generator_step_aux(
+                    tf.constant(cond[idx]),
+                    tf.random.normal([self.batch_size, self.latent_dim]),
                 )
 
         # Gerar com e_normalized=1 para encorajar valores extremos
@@ -334,7 +401,7 @@ class ExGANAugmenter(BaseAugmenter):
         season_list = list(SEASONS)
 
         for j in range(n):
-            cluster_row = X_shifted[j, -1, _N_BASE: _N_BASE + n_cl]
+            cluster_row = X_shifted[j, -1, self._n_base: self._n_base + n_cl]
             cond[j, :n_cl] = cluster_row
 
             orig_i = int(orig_indices[j])
@@ -408,16 +475,65 @@ class ExGANAugmenter(BaseAugmenter):
     # ------------------------------------------------------------------
     # Treino final (Passo 4)
 
-    def _train(self, X_data, y_data, cond_data, tf):
+    def _train(self, X_data, y_data, cond_data, tf, checkpoint_dir: str | None = None):
+        from src.pipeline.augmentation import checkpoint as ckpt
+
         generator = self._build_generator(tf)
         critic = self._build_critic(tf)
         opt_g = tf.keras.optimizers.Adam(self.learning_rate_g, beta_1=0.0)
         opt_d = tf.keras.optimizers.Adam(self.learning_rate_d, beta_1=0.0)
 
-        n = len(X_data)
-        steps_per_epoch = max(1, n // self.batch_size)
+        # Resume: se já há pesos salvos do treino final (rodada de shifting
+        # já concluída numa run anterior, ou o próprio treino final
+        # interrompido no meio), carrega e continua da época salva. Perde o
+        # estado do otimizador Adam (não checkpointado, custo aceitável —
+        # ele reconverge rápido; o generator/critic é o que importa).
+        state = ckpt.load_state(checkpoint_dir)
+        start_epoch = 0
+        if ckpt.load_weights_if_present(checkpoint_dir, "final_generator", generator):
+            ckpt.load_weights_if_present(checkpoint_dir, "final_critic", critic)
+            start_epoch = int(state.get("final_epoch", 0))
+            if start_epoch > 0:
+                print(f"[ExGAN] Checkpoint: retomando treino final da época {start_epoch + 1}/{self.epochs}.")
 
-        for epoch in range(self.epochs):
+        n = len(X_data)
+        steps_per_epoch = self.steps_per_epoch  # ver nota em _train_and_generate_aux
+
+        # Passos compilados com @tf.function (ver mesma correção em
+        # _train_and_generate_aux) — a amostragem GPD (self._sample_y_gpd,
+        # numpy puro) continua no loop Python de fora, só o forward/backward
+        # pass entra no grafo compilado.
+        @tf.function
+        def critic_step(x_r, y_r, c_r, c_fake, z):
+            with tf.GradientTape() as tape:
+                x_f, y_f = generator([z, c_fake], training=True)
+                s_real = critic([x_r, y_r, c_r], training=True)
+                s_fake = critic([x_f, y_f, c_r], training=True)
+                gp = self._gradient_penalty(critic, x_r, y_r, x_f, y_f, c_r, tf)
+                loss_c = (
+                    tf.reduce_mean(s_fake) - tf.reduce_mean(s_real)
+                    + self.lambda_gp * gp
+                )
+            grads_c = tape.gradient(loss_c, critic.trainable_variables)
+            opt_d.apply_gradients(zip(grads_c, critic.trainable_variables))
+            return loss_c
+
+        @tf.function
+        def generator_step(c_g, z, e_target_abs, c_r_sample):
+            with tf.GradientTape() as tape:
+                x_f, y_f = generator([z, c_g], training=True)
+                s_fake = critic([x_f, y_f, c_r_sample], training=True)
+                # L_ext relativa: mean(|y_fake - e_alvo| / |e_alvo|)
+                # Equivalente ao rpd do paper (ExGAN.py linha ~202)
+                loss_ext = tf.reduce_mean(
+                    tf.abs(y_f - e_target_abs) / (tf.abs(e_target_abs) + 1e-8)
+                )
+                loss_g = -tf.reduce_mean(s_fake) + self.lambda_y * loss_ext
+            grads_g = tape.gradient(loss_g, generator.trainable_variables)
+            opt_g.apply_gradients(zip(grads_g, generator.trainable_variables))
+            return loss_g
+
+        for epoch in range(start_epoch, self.epochs):
             c_loss_ep, g_loss_ep = 0.0, 0.0
 
             for _ in range(steps_per_epoch):
@@ -429,30 +545,12 @@ class ExGANAugmenter(BaseAugmenter):
                     c_r = tf.constant(cond_data[idx])
 
                     # Condicao fake: e ~ GPD para forca extremidade real
-                    c_fake = c_r.numpy().copy()
+                    c_fake = cond_data[idx].copy()
                     e_gpd = self._sample_y_gpd(self.batch_size)
                     c_fake[:, -1] = self._e_to_normalized(e_gpd).flatten()
                     z = tf.random.normal([self.batch_size, self.latent_dim])
 
-                    with tf.GradientTape() as tape:
-                        x_f, y_f = generator(
-                            [z, tf.constant(c_fake)], training=True
-                        )
-                        s_real = critic([x_r, y_r, c_r], training=True)
-                        s_fake = critic([x_f, y_f, c_r], training=True)
-                        gp = self._gradient_penalty(
-                            critic, x_r, y_r, x_f, y_f, c_r, tf
-                        )
-                        loss_c = (
-                            tf.reduce_mean(s_fake)
-                            - tf.reduce_mean(s_real)
-                            + self.lambda_gp * gp
-                        )
-
-                    grads_c = tape.gradient(loss_c, critic.trainable_variables)
-                    opt_d.apply_gradients(
-                        zip(grads_c, critic.trainable_variables)
-                    )
+                    loss_c = critic_step(x_r, y_r, c_r, tf.constant(c_fake), z)
                     c_loss_ep += float(loss_c)
 
                 # --- generator ---
@@ -467,24 +565,8 @@ class ExGANAugmenter(BaseAugmenter):
                     e_target.reshape(-1, 1), dtype=tf.float32
                 )
 
-                with tf.GradientTape() as tape:
-                    x_f, y_f = generator(
-                        [z, tf.constant(c_g)], training=True
-                    )
-                    s_fake = critic(
-                        [x_f, y_f, tf.constant(cond_data[idx])], training=True
-                    )
-                    # L_ext relativa: mean(|y_fake - e_alvo| / |e_alvo|)
-                    # Equivalente ao rpd do paper (ExGAN.py linha ~202)
-                    loss_ext = tf.reduce_mean(
-                        tf.abs(y_f - e_target_abs)
-                        / (tf.abs(e_target_abs) + 1e-8)
-                    )
-                    loss_g = -tf.reduce_mean(s_fake) + self.lambda_y * loss_ext
-
-                grads_g = tape.gradient(loss_g, generator.trainable_variables)
-                opt_g.apply_gradients(
-                    zip(grads_g, generator.trainable_variables)
+                loss_g = generator_step(
+                    tf.constant(c_g), z, e_target_abs, tf.constant(cond_data[idx]),
                 )
                 g_loss_ep += float(loss_g)
 
@@ -495,7 +577,27 @@ class ExGANAugmenter(BaseAugmenter):
                     f"G={g_loss_ep/steps_per_epoch:.3f}"
                 )
 
+            if checkpoint_dir and (
+                (epoch + 1) % self.checkpoint_every == 0 or epoch + 1 == self.epochs
+            ):
+                ckpt.save_weights(checkpoint_dir, "final_generator", generator)
+                ckpt.save_weights(checkpoint_dir, "final_critic", critic)
+                ckpt.save_state(
+                    checkpoint_dir,
+                    {"round_idx": self.k_shift, "final_epoch": epoch + 1, "done": False},
+                )
+                # Print proposital aqui (não só a cada epochs//5): o wrapper
+                # Modal faz commit do volume reagindo a linhas de stdout —
+                # sem isso, o checkpoint fica só no disco local do
+                # container até a próxima linha de log "por acaso".
+                print(f"  [ExGAN] Checkpoint salvo (época {epoch + 1}/{self.epochs}).")
+
         self._generator = generator
+        if checkpoint_dir:
+            ckpt.save_state(
+                checkpoint_dir,
+                {"round_idx": self.k_shift, "final_epoch": self.epochs, "done": True},
+            )
 
     # ------------------------------------------------------------------
     # Geracao (Passo 5)
@@ -546,7 +648,7 @@ class ExGANAugmenter(BaseAugmenter):
 
         # Forcas colunas cluster para binario exato
         cluster_oh = cond[:, : len(all_cluster_ids)]
-        x_syn[:, :, _N_BASE: _N_BASE + len(all_cluster_ids)] = (
+        x_syn[:, :, self._n_base: self._n_base + len(all_cluster_ids)] = (
             cluster_oh[:, np.newaxis, :]
         )
 

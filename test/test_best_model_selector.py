@@ -13,8 +13,10 @@ import pandas as pd
 import pytest
 
 from src.dataset.creation.best_model_selector import (
+    Combo,
     PIPELINE_ROOTS,
     apply_fitted_model_fallback,
+    build_winner_table,
     derive_quarterly_from_predictions,
     discover_combos,
     load_results,
@@ -176,6 +178,29 @@ class TestDeriveQuarterlyFromPredictions:
         derived = derive_quarterly_from_predictions(combos[0], results)
         assert derived.empty
 
+    def test_skips_predictions_missing_split_column(self, artifacts_root):
+        """Bug real encontrado numa run remota do corrected_grid no Modal:
+        predictions_by_station.csv de um schema mais antigo, sem coluna
+        'split', derrubava load_all_results_with_derived inteiro com
+        KeyError('split'). Deve pular esse combo com aviso, não crashar."""
+        combo_dir = artifacts_root / PIPELINE_ROOTS["mlp"] / "original"
+        _write_results_csv(combo_dir, [_base_result_row("mlp", "original", 1, "ALL", "test")])
+
+        preds = pd.DataFrame({
+            "estacao": ["A1", "A1"],
+            "time": ["2021-01-15", "2021-04-15"],
+            "cluster_id": [1, 1],
+            "y_true": [10.0, 8.0],
+            "y_pred": [9.5, 7.5],
+        })  # sem coluna "split" — schema antigo.
+        _write_station_predictions(combo_dir, preds)
+
+        combos = discover_combos(artifacts_root)
+        results = load_results(combos)
+        derived = derive_quarterly_from_predictions(combos[0], results)
+
+        assert derived.empty
+
 
 class TestResolveAllSeason:
     def test_derives_all_for_lstm_weighted_by_n_samples(self, artifacts_root):
@@ -250,6 +275,23 @@ class TestFallback:
         assert row["fallback_from"] is None
         assert row["has_fitted_model"]
 
+    def test_no_candidate_with_model_reports_missing(self, artifacts_root):
+        """Nenhum combo tem modelo salvo pro cluster/trimestre — deve
+        marcar has_fitted_model=False em vez de crashar."""
+        combo_dir = artifacts_root / PIPELINE_ROOTS["lazy"] / "original"
+        _write_results_csv(combo_dir, [
+            _base_result_row("lazy", "original", 9, "JJA", "test", R2=0.4),
+        ])
+        # Sem _write_fitted_models — nenhum modelo salvo.
+
+        combos = discover_combos(artifacts_root)
+        results = load_results(combos)
+        table = select_winner_table(results, metric="R2", seasons=["JJA"])
+        table = apply_fitted_model_fallback(table, combos, results, "R2")
+
+        row = table[(table["cluster_id"] == 9) & (table["season"] == "JJA")].iloc[0]
+        assert not row["has_fitted_model"]
+
 
 class TestLazyDuplicateRows:
     def test_load_station_predictions_dedups(self, artifacts_root):
@@ -268,3 +310,101 @@ class TestLazyDuplicateRows:
         combos = discover_combos(artifacts_root)
         loaded = load_station_predictions(combos[0])
         assert len(loaded) == 5
+
+
+# ── Fase 2 do plano de correção ERA5 2000-2024: modelos lazy por trimestre ──
+#
+# Cobre a lógica season-aware adicionada a Combo.available_cluster_seasons()
+# e apply_fitted_model_fallback() — antes, `available_clusters()` só sabia
+# dizer "tem algum modelo salvo pro cluster X", sem distinguir se era o
+# modelo certo pro trimestre ou só o pooled (season=None).
+
+def _write_fitted_model_seasons(combo_dir: Path, entries: list[tuple[int, str | None]]) -> None:
+    """entries: lista de (cluster_id, season) — season=None grava sem
+    sufixo (pooled), senão grava best_model_c{cid}_{season}.joblib."""
+    models_dir = combo_dir / "fitted_models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    for cid, season in entries:
+        suffix = f"_{season}" if season else ""
+        (models_dir / f"best_model_c{cid}{suffix}.joblib").write_bytes(b"")
+
+
+class TestAvailableClusterSeasons:
+    def test_parses_pooled_and_per_season_filenames(self, artifacts_root):
+        combo_dir = artifacts_root / PIPELINE_ROOTS["lazy"] / "original"
+        _write_fitted_model_seasons(combo_dir, [(1, None), (2, "DJF"), (2, "JJA")])
+        combo = Combo(pipeline="lazy", arm="original", dir=combo_dir, feature_groups="original")
+
+        assert combo.available_cluster_seasons() == {(1, None), (2, "DJF"), (2, "JJA")}
+        assert combo.available_clusters() == {1, 2}
+
+    def test_empty_when_no_models_dir(self, artifacts_root):
+        combo = Combo(pipeline="lazy", arm="original", dir=artifacts_root / "nope",
+                       feature_groups="original")
+        assert combo.available_cluster_seasons() == set()
+        assert combo.available_clusters() == set()
+
+
+class TestSeasonAwareFallback:
+    def test_accepts_winner_with_season_specific_model(self, artifacts_root):
+        """Vencedor (lazy, original) pro cluster 1 trimestre DJF tem modelo
+        específico de DJF salvo (além do pooled) — deve ser aceito direto,
+        sem fallback."""
+        combo_dir = artifacts_root / PIPELINE_ROOTS["lazy"] / "original"
+        _write_results_csv(combo_dir, [
+            _base_result_row("lazy", "original", 1, "DJF", "test", R2=0.8),
+        ])
+        _write_fitted_model_seasons(combo_dir, [(1, None), (1, "DJF")])
+
+        combos = discover_combos(artifacts_root)
+        results = load_results(combos)
+        table = select_winner_table(results, metric="R2", seasons=["DJF"])
+        table = apply_fitted_model_fallback(table, combos, results, "R2")
+
+        row = table[(table["cluster_id"] == 1) & (table["season"] == "DJF")].iloc[0]
+        assert row["has_fitted_model"]
+        assert row["pipeline"] == "lazy"
+        assert row["fallback_from"] is None
+
+    def test_falls_back_to_pooled_when_no_season_specific_model(self, artifacts_root):
+        """Combo só tem o modelo pooled (mlp/lstm hoje, ou lazy antes do
+        fix) — ainda deve contar como tendo modelo (fallback implícito pro
+        pooled), sem precisar descer pro próximo candidato do ranking."""
+        combo_dir = artifacts_root / PIPELINE_ROOTS["mlp"] / "original"
+        _write_results_csv(combo_dir, [
+            _base_result_row("mlp", "original", 1, "DJF", "test", R2=0.5),
+        ])
+        _write_fitted_model_seasons(combo_dir, [(1, None)])
+
+        combos = discover_combos(artifacts_root)
+        results = load_results(combos)
+        table = select_winner_table(results, metric="R2", seasons=["DJF"])
+        table = apply_fitted_model_fallback(table, combos, results, "R2")
+
+        row = table[(table["cluster_id"] == 1) & (table["season"] == "DJF")].iloc[0]
+        assert row["has_fitted_model"]
+        assert row["fallback_from"] is None
+
+
+class TestBuildWinnerTableEndToEnd:
+    def test_lazy_per_season_champion_wins_over_mlp_all_only(self, artifacts_root):
+        mlp_dir = artifacts_root / PIPELINE_ROOTS["mlp"] / "original"
+        _write_results_csv(mlp_dir, [
+            _base_result_row("mlp", "original", 1, "ALL", "test", n_samples=40, R2=0.5),
+        ])
+        _write_fitted_model_seasons(mlp_dir, [(1, None)])
+
+        lazy_dir = artifacts_root / PIPELINE_ROOTS["lazy"] / "original"
+        _write_results_csv(lazy_dir, [
+            _base_result_row("lazy", "original", 1, "ALL", "test", n_samples=40, R2=0.4),
+            _base_result_row("lazy", "original", 1, "DJF", "test", n_samples=10, R2=0.9),
+        ])
+        _write_fitted_model_seasons(lazy_dir, [(1, None), (1, "DJF")])
+
+        table, combos = build_winner_table(str(artifacts_root), metric="R2")
+
+        assert {(c.pipeline, c.arm) for c in combos} == {("mlp", "original"), ("lazy", "original")}
+        djf_row = table[(table["cluster_id"] == 1) & (table["season"] == "DJF")]
+        assert len(djf_row) == 1
+        assert djf_row.iloc[0]["pipeline"] == "lazy"
+        assert djf_row.iloc[0]["has_fitted_model"]

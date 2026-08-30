@@ -208,8 +208,14 @@ def _ensure_dataset(force: bool = False) -> None:
         REMOTE_DATASET_DIR: dataset_volume,
     },
     gpu="A10G",      # A10G para runs com augmentação (GPU mais rápida)
-    timeout=10800,   # 3 horas — margem extra: 271 estações/14 clusters
-                     # aumentam tanto o load_extended() quanto o treino
+    timeout=21600,   # 6 horas — margem de segurança (Modal só cobra pelo
+                     # tempo real de execução, não pelo teto do timeout).
+                     # Um run real travou 3h sem terminar antes da correção
+                     # de performance do ExGAN/Diffusion (eager mode +
+                     # steps_per_epoch escalando com o dataset); com a
+                     # correção, o esperado é ~1h para augmentation.method
+                     # extreme_gan/extreme_diffusion — 6h é folga generosa,
+                     # não uma expectativa de tempo real de execução.
     memory=32768,    # 32 GB RAM (NetCDF + xarray são mais exigentes)
     # nonpreemptible=True não suportado em workloads de GPU (Modal) — sem
     # checkpoint por cluster, uma preempção aqui reinicia os 14 do zero.
@@ -236,6 +242,13 @@ def run_experiment(
         Opções: 'extreme_gan', 'extreme_diffusion', 'none'.
     """
     import subprocess
+    import time
+
+    # Container novo pode não enxergar commits feitos por uma tentativa
+    # anterior (retry do mesmo exp_name) sem um reload explícito — é onde
+    # um checkpoint parcial de augmentation.method=extreme_gan/
+    # extreme_diffusion salvo antes de um timeout/crash anterior estaria.
+    artifact_volume.reload()
 
     config_path = f"{REMOTE_APP_DIR}/config/{config_name}"
     print(f"[modal] Dataset: {REMOTE_DATASET_DIR}")
@@ -272,14 +285,30 @@ def run_experiment(
     # Streaming linha-a-linha — antes usava capture_output=True, que só
     # imprime tudo de uma vez quando o processo INTEIRO termina (até 3h);
     # não dava pra saber se estava progredindo ou travado.
+    #
+    # Commit periódico do volume DURANTE o streaming (não só no final): sem
+    # isso, qualquer checkpoint que augmentation.method=extreme_gan/
+    # extreme_diffusion escreva em disco (ver src/pipeline/augmentation/
+    # checkpoint.py) fica só no filesystem local do container — se o
+    # processo for morto por timeout (como aconteceu num run real), esses
+    # checkpoints nunca chegam a ser persistidos no volume e um retry
+    # recomeça do zero mesmo com o mecanismo de resume implementado.
+    COMMIT_INTERVAL_S = 120
     proc = subprocess.Popen(
         cmd, cwd=REMOTE_APP_DIR, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
     )
+    last_commit = time.time()
     for line in proc.stdout:
         print(line, end="", flush=True)
+        if time.time() - last_commit > COMMIT_INTERVAL_S:
+            artifact_volume.commit()
+            last_commit = time.time()
     proc.wait()
     if proc.returncode != 0:
+        # Ainda commita antes de propagar o erro — se o processo morreu
+        # depois de ter salvo checkpoint(s), o próximo retry precisa vê-los.
+        artifact_volume.commit()
         raise RuntimeError(f"cluster_lstm falhou (exit {proc.returncode}).")
 
     artifact_volume.commit()

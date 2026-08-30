@@ -36,7 +36,7 @@ from src.data.cluster_assigner import assign_station_clusters
 from src.data.climatology import get_climatology
 from src.pipelines.common import (
     BASE_FEATURES, TARGET_VAR, ERA5_GUST_PROXY, TRAIN_SLICE, VAL_SLICE, TEST_SLICE,
-    build_flat_dataframe, RANDOM_STATE,
+    build_flat_dataframe, RANDOM_STATE, month_to_season,
 )
 
 warnings.filterwarnings("ignore")
@@ -108,7 +108,10 @@ class SpatialCorrector:
         self.models_dir = Path(models_dir)
         self.loader = NetCDFLoader(str(self.raw_dir))
 
-        self.cluster_models: dict[int, dict[str, Any]] = {}
+        # Chave (cluster_id, season) — season=None é o modelo pooled (ano
+        # inteiro; sempre o caso pra artifacts mlp/lstm, e o fallback do lazy
+        # quando não há campeão específico daquele trimestre).
+        self.cluster_models: dict[tuple[int, str | None], dict[str, Any]] = {}
         self.df_all: pd.DataFrame | None = None
         self._station_lats: np.ndarray | None = None
         self._station_lons: np.ndarray | None = None
@@ -158,11 +161,15 @@ class SpatialCorrector:
                 print(f"  ✗ {jf.name}: falha ao carregar ({e}) — pulando cluster.")
                 continue
             cid = artifact["cluster_id"]
-            self.cluster_models[cid] = artifact
+            # artifacts salvos antes do suporte a season (mlp/lstm, e lazy
+            # pré-fix) não têm a chave — .get() já retorna None (pooled).
+            season = artifact.get("season")
+            self.cluster_models[(cid, season)] = artifact
             r2 = artifact.get("r2")
             r2_str = f"R²={r2:.4f}, " if r2 is not None else ""
+            season_str = f"/{season}" if season else ""
             print(
-                f"  ✓ Cluster {cid}: {artifact['model_name']} "
+                f"  ✓ Cluster {cid}{season_str}: {artifact['model_name']} "
                 f"({r2_str}{len(artifact['features'])} features)"
             )
 
@@ -234,53 +241,33 @@ class SpatialCorrector:
         ].copy()
 
         df_slice["rajada_corrigida"] = np.nan
+        # Trimestre por linha, resolvido uma vez — usado pra escolher, por
+        # estação/dia, entre o modelo específico do trimestre (se existir) e
+        # o modelo pooled (season=None) como fallback.
+        df_slice["_season"] = month_to_season(df_slice["time"].dt.month)
 
-        for cid, artifact in self.cluster_models.items():
-            mask = df_slice["cluster_id"] == cid
-            if not mask.any():
+        models_by_cluster: dict[int, dict[str | None, dict[str, Any]]] = {}
+        for (cid, season), artifact in self.cluster_models.items():
+            models_by_cluster.setdefault(cid, {})[season] = artifact
+
+        for cid, season_models in models_by_cluster.items():
+            cluster_mask = df_slice["cluster_id"] == cid
+            if not cluster_mask.any():
                 continue
+            # Trimestres com modelo específico cobrem só suas próprias linhas;
+            # o restante (e o cluster inteiro, se só houver pooled) cai no
+            # modelo pooled, quando existir.
+            specific_seasons = [s for s in season_models if s is not None]
+            for season, artifact in season_models.items():
+                if season is None:
+                    mask = cluster_mask & ~df_slice["_season"].isin(specific_seasons)
+                else:
+                    mask = cluster_mask & (df_slice["_season"] == season)
+                if not mask.any():
+                    continue
+                self._predict_masked(df_slice, mask, artifact, cid, season)
 
-            features = artifact["features"]
-            imputer = artifact["imputer"]
-            scaler = artifact["scaler"]
-            model = artifact["model"]
-
-            # Extrair features (mesma lista usada no treino)
-            available = [f for f in features if f in df_slice.columns]
-            if len(available) < len(features):
-                missing = set(features) - set(available)
-                print(f"  ⚠ Cluster {cid}: {len(missing)} features ausentes, preenchendo com NaN")
-                for f in missing:
-                    df_slice[f] = np.nan
-
-            x = df_slice.loc[mask, features]
-
-            # Aplicar mesma pipeline de pré-processamento do treino
-            x_imp = imputer.transform(x)
-            x_scaled = scaler.transform(x_imp)
-
-            # Modelos treinados com Pandas (LazyPredict/Scikit-Learn) podem requerer
-            # nomes de colunas explícitos se usaram pipelines ou ColumnTransformer
-            x_scaled_df = pd.DataFrame(x_scaled, columns=features)
-
-            # target_kind explícito (novos artifacts) com fallback pro
-            # comportamento antigo (artifacts salvos antes dessa chave
-            # existir) — só MLPRegressor era tratado como razão.
-            target_kind = artifact.get(
-                "target_kind",
-                "ratio" if artifact.get("model_name") == "MLPRegressor" else "absolute",
-            )
-            if target_kind == "ratio":
-                ratio_preds = model.predict(x_scaled_df)
-                # ERA5 proxy baseline
-                era5_proxy = df_slice.loc[mask, "wind_mag_max"].values
-                era5_safe = np.clip(era5_proxy, 0.1, None)
-                preds = ratio_preds * era5_safe
-            else:
-                preds = model.predict(x_scaled_df)
-                
-            preds = np.clip(preds, 0, 80)  # range físico
-            df_slice.loc[mask, "rajada_corrigida"] = preds
+        df_slice = df_slice.drop(columns=["_season"])
 
         n_pred = df_slice["rajada_corrigida"].notna().sum()
         n_total = len(df_slice)
@@ -288,6 +275,54 @@ class SpatialCorrector:
 
         return df_slice[["time", "estacao", "latitude", "longitude",
                          "cluster_id", TARGET_VAR, ERA5_GUST_PROXY, "rajada_corrigida"]]
+
+    def _predict_masked(
+        self, df_slice: pd.DataFrame, mask: pd.Series, artifact: dict[str, Any],
+        cid: int, season: str | None,
+    ) -> None:
+        """Aplica um modelo (cluster, season) às linhas selecionadas por `mask`,
+        escrevendo o resultado em `df_slice["rajada_corrigida"]` in-place."""
+        features = artifact["features"]
+        imputer = artifact["imputer"]
+        scaler = artifact["scaler"]
+        model = artifact["model"]
+
+        # Extrair features (mesma lista usada no treino)
+        available = [f for f in features if f in df_slice.columns]
+        if len(available) < len(features):
+            missing = set(features) - set(available)
+            print(f"  ⚠ Cluster {cid}: {len(missing)} features ausentes, preenchendo com NaN")
+            for f in missing:
+                df_slice[f] = np.nan
+
+        x = df_slice.loc[mask, features]
+
+        # Aplicar mesma pipeline de pré-processamento do treino
+        x_imp = imputer.transform(x)
+        x_scaled = scaler.transform(x_imp)
+
+        # Modelos treinados com Pandas (LazyPredict/Scikit-Learn) podem requerer
+        # nomes de colunas explícitos se usaram pipelines ou ColumnTransformer
+        x_scaled_df = pd.DataFrame(x_scaled, columns=features)
+
+        # target_kind explícito (novos artifacts) com fallback pro
+        # comportamento antigo (artifacts salvos antes dessa chave
+        # existir) — só MLPRegressor era tratado como razão.
+        target_kind = artifact.get(
+            "target_kind",
+            "ratio" if artifact.get("model_name") == "MLPRegressor" else "absolute",
+        )
+        if target_kind == "ratio":
+            ratio_preds = model.predict(x_scaled_df)
+            # ERA5 proxy baseline
+            era5_proxy = df_slice.loc[mask, "wind_mag_max"].values
+            era5_safe = np.clip(era5_proxy, 0.1, None)
+            preds = ratio_preds * era5_safe
+        else:
+            preds = model.predict(x_scaled_df)
+
+        preds = np.clip(preds, 0, 80)  # range físico
+        df_slice.loc[mask, "rajada_corrigida"] = preds
 
     # ── Step 3: IDW to grid ──────────────────────────────────────────────
 
@@ -339,10 +374,23 @@ class SpatialCorrector:
                 if not np.all(np.isnan(field)):
                     grid_arr[t] = gaussian_filter(field, sigma=1.0)
 
-        # Resumo dos modelos usados
+        # Resumo dos modelos usados. Robusto a duas variações de
+        # `cluster_models` entre subclasses: SpatialCorrector usa chave
+        # (cluster_id, season) e artifact dict com "model_name";
+        # DLSpatialCorrector (pré-existente, não relacionado ao fix de
+        # season) usa chave cluster_id nua e valor = modelo Keras direto.
+        def _summary_key(k: object) -> tuple[int, str]:
+            cid, season = k if isinstance(k, tuple) else (k, None)
+            return (cid, season or "")
+
+        def _summary_label(k: object, a: object) -> str:
+            cid, season = k if isinstance(k, tuple) else (k, None)
+            name = a["model_name"] if isinstance(a, dict) else type(a).__name__
+            return f"C{cid}" + (f"/{season}" if season else "") + f"={name}"
+
         model_summary = ", ".join(
-            f"C{cid}={a['model_name']}"
-            for cid, a in sorted(self.cluster_models.items())
+            _summary_label(k, a)
+            for k, a in sorted(self.cluster_models.items(), key=lambda kv: _summary_key(kv[0]))
         )
 
         ds_out = xr.Dataset(

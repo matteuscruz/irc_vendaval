@@ -779,8 +779,11 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     )
 
     # ── Serializar o melhor modelo para inferência espacial ────────────────
-    # Salva: modelo fitado + imputer + scaler + lista de features
-    if fitted and best_model in fitted and season is None:
+    # Salva: modelo fitado + imputer + scaler + lista de features. Persiste
+    # tanto o modelo pooled (season=None) quanto os campeões por trimestre —
+    # antes só o pooled era salvo, então o vencedor "por trimestre" da tabela
+    # de ablation nunca chegava a ser usado na inferência espacial.
+    if fitted and best_model in fitted:
         import joblib
         from sklearn.impute import SimpleImputer
         from sklearn.preprocessing import RobustScaler
@@ -797,6 +800,7 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
             "scaler": _scaler,
             "features": list(train_features),
             "cluster_id": cid,
+            "season": season,
             "r2": float(scores.loc[scores["Model"] == best_model, "R-Squared"].iloc[0]),
             # LazyPredict prevê o valor absoluto (m/s), não uma razão sobre
             # o ERA5 — usado por SpatialCorrector pra decidir a reconstrução

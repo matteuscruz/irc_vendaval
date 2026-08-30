@@ -63,7 +63,6 @@ augmentation:
     batch_size: 64
     p_uncond: 0.1
     guidance_scale: 5.0
-    y_target: 2.0
 
 visualization:
   enabled: true

@@ -6,24 +6,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from shapely.geometry import box
 
-# 6 estações INMET reais (código + lat/lon reais, extraídos de
-# dataset/raw/INMET_Stratified.nc), 3 de cada uma de duas estações
-# climáticas reais distintas (cluster_id 9 e 10 em dataset/shp/shp_vento.shp)
-# — usar coordenadas reais evita ter que sintetizar um shapefile: os pontos
-# caem dentro de polígonos de verdade, então assign_station_clusters()
-# funciona sem alteração nenhuma.
+# 6 códigos+lat/lon de estações INMET reais (extraídos de
+# dataset/raw/INMET_Stratified.nc), 3 de cada uma de duas estações climáticas
+# reais distintas (cluster_id 9 e 10 em dataset/shp/shp_vento.shp) — só pra
+# ter coordenadas plausíveis dentro da bacia. dataset/shp/ NÃO é versionado
+# no git (mesma regra `dataset/*` do .gitignore que exclui dataset/raw/, só
+# existe localmente) — build_synthetic_shp_dir() abaixo gera um shapefile
+# próprio (um quadrado pequeno ao redor de cada estação, mesmo cluster_id),
+# então os testes não dependem de nenhum arquivo fora do controle de versão.
 _SYNTHETIC_STATIONS = [
-    ("A504", -21.4500, -45.9500),  # cluster 9
-    ("A509", -22.8617, -46.0433),  # cluster 9
-    ("A515", -21.5664, -45.4042),  # cluster 9
-    ("A501", -19.9500, -44.0833),  # cluster 10
-    ("A502", -21.2283, -43.7678),  # cluster 10
-    ("A505", -19.6058, -46.9497),  # cluster 10
+    ("A504", -21.4500, -45.9500, "09"),
+    ("A509", -22.8617, -46.0433, "09"),
+    ("A515", -21.5664, -45.4042, "09"),
+    ("A501", -19.9500, -44.0833, "10"),
+    ("A502", -21.2283, -43.7678, "10"),
+    ("A505", -19.6058, -46.9497, "10"),
 ]
 
 
@@ -47,9 +51,9 @@ def build_synthetic_raw_dir(raw_dir: Path) -> Path:
     o subconjunto de ORIGINAL_FEATURES que só depende de INMET+ERA5 base.
     """
     raw_dir.mkdir(parents=True, exist_ok=True)
-    stations = [s for s, _, _ in _SYNTHETIC_STATIONS]
-    lats = [lat for _, lat, _ in _SYNTHETIC_STATIONS]
-    lons = [lon for _, _, lon in _SYNTHETIC_STATIONS]
+    stations = [s for s, _, _, _ in _SYNTHETIC_STATIONS]
+    lats = [lat for _, lat, _, _ in _SYNTHETIC_STATIONS]
+    lons = [lon for _, _, lon, _ in _SYNTHETIC_STATIONS]
     dates = _synthetic_dates()
 
     rng = np.random.default_rng(42)
@@ -109,14 +113,29 @@ def build_synthetic_raw_dir(raw_dir: Path) -> Path:
     return raw_dir
 
 
+def build_synthetic_shp_dir(shp_dir: Path) -> Path:
+    """Escreve um shapefile minúsculo em shp_dir: um quadrado de ~0.1° de
+    lado ao redor de cada estação sintética, rotulado com o cluster_id
+    correspondente — o bastante pra assign_station_clusters() (spatial join
+    'within') atribuir cada estação ao cluster certo sem depender do
+    shapefile real (não versionado, ver comentário de _SYNTHETIC_STATIONS).
+    """
+    shp_dir.mkdir(parents=True, exist_ok=True)
+    half = 0.05
+    rows = [
+        {"cluster": cluster, "geometry": box(lon - half, lat - half, lon + half, lat + half)}
+        for _, lat, lon, cluster in _SYNTHETIC_STATIONS
+    ]
+    gdf = gpd.GeoDataFrame(rows, crs="EPSG:4326")
+    gdf.to_file(shp_dir / "synthetic_clusters.shp")
+    return shp_dir
+
+
 @pytest.fixture
 def synthetic_raw_dir(tmp_path: Path) -> Path:
     return build_synthetic_raw_dir(tmp_path / "raw")
 
 
 @pytest.fixture
-def real_shp_dir() -> Path:
-    """dataset/shp/ é pequeno e versionado no git (ao contrário de
-    dataset/raw/) — existe tanto localmente quanto em CI, reusado direto em
-    vez de sintetizar um shapefile."""
-    return Path(__file__).resolve().parents[1] / "dataset" / "shp"
+def synthetic_shp_dir(tmp_path: Path) -> Path:
+    return build_synthetic_shp_dir(tmp_path / "shp")

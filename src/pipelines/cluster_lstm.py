@@ -365,7 +365,13 @@ def run(
     if aug_cfg:
         from src.pipeline.augmentation.factory import augmenter_factory
 
-        augmenter = augmenter_factory(aug_cfg)
+        # Checkpoint dentro do diretório do próprio experimento — sobrevive
+        # a timeout/crash do processo (ver src/pipeline/augmentation/
+        # checkpoint.py): um retry do MESMO exp_name retoma o treino do GAN/
+        # diffusion em vez de recomeçar do zero, desde que o volume Modal
+        # tenha sido commitado com o checkpoint parcial antes do timeout.
+        checkpoint_dir = str(output_dir / "_gan_checkpoint")
+        augmenter = augmenter_factory(aug_cfg, checkpoint_dir=checkpoint_dir)
         if augmenter is not None:
             print(
                 "\n[augmentation] Gerando amostras sinteticas de extremos..."

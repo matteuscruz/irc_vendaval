@@ -82,6 +82,23 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_ranking(summary_df: pd.DataFrame, rank_by: str) -> pd.DataFrame:
+    """Rankeia os braços DENTRO de cada pipeline por `rank_by` (rank 1 = melhor).
+
+    R² geral mascara desempenho na cauda (ver gans_research.md, eixo TSTR) —
+    'RMSE_P90'/'Bias_P90' são a régua recomendada pra julgar se um braço com
+    dados sintéticos realmente ajuda nos extremos, não só no corpo da
+    distribuição. `Bias_P90` rankeia por |Bias_P90| (mais perto de 0 é
+    melhor, sinal não importa pra ranking).
+    """
+    df = summary_df.copy()
+    df["_rank_key"] = df["Bias_P90"].abs() if rank_by == "Bias_P90" else df[rank_by]
+    ascending = rank_by != "R2"  # R2: maior é melhor. RMSE_P90/|Bias_P90|: menor é melhor.
+    df = df.sort_values(["pipeline", "_rank_key"], ascending=[True, ascending]).reset_index(drop=True)
+    df["rank"] = df.groupby("pipeline").cumcount() + 1
+    return df.drop(columns="_rank_key")
+
+
 # ── Plots ────────────────────────────────────────────────────────────────
 
 def _style_axes(ax):
@@ -213,6 +230,12 @@ def main():
     parser.add_argument("--exp-prefix", type=str, default="")
     parser.add_argument("--out-dir", type=str, default=str(ROOT / "artifacts" / "ablation_comparison_all"))
     parser.add_argument("--tag", type=str, default=None)
+    parser.add_argument("--rank-by", choices=["R2", "RMSE_P90", "Bias_P90"], default="R2",
+                        help="Métrica usada pra rankear os braços dentro de cada pipeline em "
+                             "tstr_ranking.csv (rank 1 = melhor). Default R2 preserva o "
+                             "comportamento de leitura anterior; RMSE_P90/Bias_P90 julgam pela "
+                             "cauda (P90+), a régua recomendada pra decidir se um braço com "
+                             "dados sintéticos ajuda de verdade nos extremos (ver gans_research.md).")
     args = parser.parse_args()
 
     base_dirs = {
@@ -238,6 +261,11 @@ def main():
     summary_df.to_csv(out_dir / "comparison_summary.csv", index=False)
     print(f"[compare-ablation] Resumo salvo: {out_dir / 'comparison_summary.csv'}")
     print(summary_df.sort_values(["pipeline", "arm"]).to_string(index=False))
+
+    ranking_df = build_ranking(summary_df, args.rank_by)
+    ranking_df.to_csv(out_dir / "tstr_ranking.csv", index=False)
+    print(f"\n[compare-ablation] Ranking por {args.rank_by} salvo: {out_dir / 'tstr_ranking.csv'}")
+    print(ranking_df.to_string(index=False))
 
     import matplotlib
     matplotlib.use("Agg")
