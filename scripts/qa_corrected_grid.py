@@ -8,8 +8,11 @@ e não falha o processo (achados vão pro relatório, não pro exit code):
    dia-a-dia típica dentro de cada ano (sinalizaria problema na costura
    entre duas tabelas de vencedores diferentes, se essa abordagem tivesse
    sido usada — ver Fase 4 do plano).
-2. Flag `in_sample`: confirma que reflete exatamente `time <= TRAIN_SLICE[1]`
-   (2018-12-31) em cada arquivo, célula a célula da coordenada de tempo.
+2. Flag `in_sample`: confirma que reflete exatamente
+   `TRAIN_SLICE[0] <= time <= TRAIN_SLICE[1]` em cada arquivo, célula a
+   célula da coordenada de tempo (antes de 2026-09-01 só checava o limite
+   superior, marcando erroneamente anos antes do início de TRAIN_SLICE
+   como in_sample=True).
 3. Spot-check de vencedores: cruza N linhas aleatórias de um winners.csv/
    winners_full.csv com o results.csv do combo correspondente, conferindo
    que metric_value/n_samples batem (winner table não fabricou número).
@@ -28,6 +31,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+TRAIN_START = "2000-01-01"
 TRAIN_END = "2018-12-31"
 
 
@@ -82,11 +86,14 @@ def check_in_sample_flag(grid_dir: Path) -> None:
     if not files:
         print(f"  [PULADO] Nenhum grid_corrected_*.nc em {grid_dir}")
         return
-    train_end = pd.Timestamp(TRAIN_END)
+    train_start, train_end = pd.Timestamp(TRAIN_START), pd.Timestamp(TRAIN_END)
     n_bad = 0
     for f in files:
         ds = xr.open_dataset(f)
-        expected = (ds["time"].values <= np.datetime64(train_end))
+        expected = (
+            (ds["time"].values >= np.datetime64(train_start))
+            & (ds["time"].values <= np.datetime64(train_end))
+        )
         actual = ds["in_sample"].values
         mismatch = int((expected != actual).sum())
         if mismatch:

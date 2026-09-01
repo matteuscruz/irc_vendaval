@@ -151,6 +151,78 @@ def _load_era5_basin(raw_dir: str) -> xr.Dataset:
 
 # ── Orquestração ─────────────────────────────────────────────────────────────
 
+def select_quarterly_winners(winner_table: pd.DataFrame) -> pd.DataFrame:
+    """Filtra a tabela de vencedores pros vencedores por trimestre (não
+    'ALL') que de fato têm modelo salvo — só esses entram na correção
+    espacial. Extraído de `run()` sem mudança de lógica."""
+    quarterly = winner_table[
+        (winner_table["season"] != "ALL") & (winner_table["has_fitted_model"])
+    ]
+    if quarterly.empty:
+        raise RuntimeError(
+            "Nenhum vencedor por trimestre com modelo salvo disponível — nada a gerar."
+        )
+    return quarterly
+
+
+def predict_all_combos(
+    quarterly: pd.DataFrame, combos: list[Combo], raw_dir: str, shp_dir: str,
+    time_slice: tuple[str, str],
+) -> pd.DataFrame:
+    """Recarrega cada (pipeline, arm) vencedor e prediz em todas as estações
+    pro período pedido. Extraído de `run()` sem mudança de lógica —
+    `_predict_combo` já era uma função independente, só a orquestração do
+    loop estava inline."""
+    combo_by_key = {(c.pipeline, c.arm): c for c in combos}
+    needed = sorted({(row.pipeline, row.arm) for row in quarterly.itertuples()})
+    print(f"[corrected_grid] {len(needed)} combinação(ões) (pipeline, arm) a recarregar...")
+
+    station_frames = []
+    for pipeline, arm in needed:
+        combo = combo_by_key[(pipeline, arm)]
+        print(f"  → {pipeline}/{arm} ({time_slice[0]}..{time_slice[1]})...")
+        preds = _predict_combo(combo, raw_dir, shp_dir, time_slice)
+        if preds.empty:
+            print("    ⚠ Nenhuma predição retornada — combo será ignorado.")
+            continue
+        preds = preds.copy()
+        preds["pipeline"] = pipeline
+        preds["arm"] = arm
+        station_frames.append(preds)
+
+    if not station_frames:
+        raise RuntimeError("Nenhuma predição por estação foi gerada — abortando.")
+    all_preds = pd.concat(station_frames, ignore_index=True)
+    all_preds["time"] = pd.to_datetime(all_preds["time"])
+    all_preds["season"] = month_to_season(all_preds["time"].dt.month)
+    return all_preds
+
+
+def stitch_predictions(quarterly: pd.DataFrame, all_preds: pd.DataFrame) -> pd.DataFrame:
+    """"Costura": cada estação usa o combo que venceu SEU cluster, NAQUELE
+    trimestre específico (não o vencedor do ano inteiro). Extraído de
+    `run()` sem mudança de lógica."""
+    stitched_frames = []
+    for row in quarterly.itertuples():
+        sub = all_preds[
+            (all_preds["pipeline"] == row.pipeline)
+            & (all_preds["arm"] == row.arm)
+            & (all_preds["cluster_id"] == row.cluster_id)
+            & (all_preds["season"] == row.season)
+        ]
+        if not sub.empty:
+            stitched_frames.append(sub)
+    if not stitched_frames:
+        raise RuntimeError("Nenhuma predição sobrou após 'costurar' vencedores — abortando.")
+    stitched = pd.concat(stitched_frames, ignore_index=True)
+    stitched["residual"] = stitched["rajada_corrigida"] - stitched[ERA5_GUST_PROXY]
+    print(
+        f"[corrected_grid] {len(stitched)} predições costuradas, "
+        f"{stitched['estacao'].nunique()} estações únicas."
+    )
+    return stitched
+
+
 def run(
     *,
     raw_dir: str = "dataset/raw",
@@ -169,6 +241,8 @@ def run(
     per_year: bool = True,
     clusters: str | None = None,
     winners_only: bool = False,
+    precomputed_winner_table: pd.DataFrame | None = None,
+    precomputed_combos: list[Combo] | None = None,
     **_,
 ) -> None:
     from src.utils.artifact_manager import ArtifactManager
@@ -189,8 +263,19 @@ def run(
     print(f"[corrected_grid] Experimento: {manager.root}")
 
     # ── 1. Vencedores ────────────────────────────────────────────────────
-    print("[corrected_grid] Selecionando melhor modelo por cluster × trimestre...")
-    winner_table, combos = build_winner_table(artifacts_root, metric)
+    # precomputed_winner_table/precomputed_combos (Kedro): se já vieram
+    # prontos de um passo anterior (ex.: apply_fallback_to_saved_models),
+    # não recalcula — evita rodar a seleção duas vezes com a métrica errada
+    # por engano (bug real encontrado: o wrapper Kedro descartava a tabela
+    # já calculada e a métrica passada, e `run()` recalculava do zero com
+    # seu próprio default). Nenhum chamador existente (CLI/Modal) passa
+    # esses parâmetros — comportamento 100% inalterado pra eles.
+    if precomputed_winner_table is not None and precomputed_combos is not None:
+        print("[corrected_grid] Usando tabela de vencedores já calculada (Kedro)...")
+        winner_table, combos = precomputed_winner_table, precomputed_combos
+    else:
+        print("[corrected_grid] Selecionando melhor modelo por cluster × trimestre...")
+        winner_table, combos = build_winner_table(artifacts_root, metric)
     if clusters:
         wanted = {int(c) for c in clusters.split(",")}
         winner_table = winner_table[winner_table["cluster_id"].isin(wanted)]
@@ -204,59 +289,15 @@ def run(
     if winners_only:
         return
 
-    quarterly = winner_table[
-        (winner_table["season"] != "ALL") & (winner_table["has_fitted_model"])
-    ]
-    if quarterly.empty:
-        raise RuntimeError(
-            "Nenhum vencedor por trimestre com modelo salvo disponível — nada a gerar."
-        )
+    quarterly = select_quarterly_winners(winner_table)
 
     # ── 2. Predições por estação — reload dos modelos já treinados ───────
-    combo_by_key = {(c.pipeline, c.arm): c for c in combos}
-    needed = sorted({(row.pipeline, row.arm) for row in quarterly.itertuples()})
-    print(f"[corrected_grid] {len(needed)} combinação(ões) (pipeline, arm) a recarregar...")
-
     time_slice = (start_date, end_date)
-    station_frames = []
-    for pipeline, arm in needed:
-        combo = combo_by_key[(pipeline, arm)]
-        print(f"  → {pipeline}/{arm} ({time_slice[0]}..{time_slice[1]})...")
-        preds = _predict_combo(combo, raw_dir, shp_dir, time_slice)
-        if preds.empty:
-            print("    ⚠ Nenhuma predição retornada — combo será ignorado.")
-            continue
-        preds = preds.copy()
-        preds["pipeline"] = pipeline
-        preds["arm"] = arm
-        station_frames.append(preds)
-
-    if not station_frames:
-        raise RuntimeError("Nenhuma predição por estação foi gerada — abortando.")
-    all_preds = pd.concat(station_frames, ignore_index=True)
-    all_preds["time"] = pd.to_datetime(all_preds["time"])
-    all_preds["season"] = month_to_season(all_preds["time"].dt.month)
+    all_preds = predict_all_combos(quarterly, combos, raw_dir, shp_dir, time_slice)
 
     # ── 3. "Costura": cada estação usa o combo que venceu SEU cluster,
     # NAQUELE trimestre específico (não o vencedor do ano inteiro). ──────
-    stitched_frames = []
-    for row in quarterly.itertuples():
-        sub = all_preds[
-            (all_preds["pipeline"] == row.pipeline)
-            & (all_preds["arm"] == row.arm)
-            & (all_preds["cluster_id"] == row.cluster_id)
-            & (all_preds["season"] == row.season)
-        ]
-        if not sub.empty:
-            stitched_frames.append(sub)
-    if not stitched_frames:
-        raise RuntimeError("Nenhuma predição sobrou após 'costurar' vencedores — abortando.")
-    stitched = pd.concat(stitched_frames, ignore_index=True)
-    stitched["residual"] = stitched["rajada_corrigida"] - stitched[ERA5_GUST_PROXY]
-    print(
-        f"[corrected_grid] {len(stitched)} predições costuradas, "
-        f"{stitched['estacao'].nunique()} estações únicas."
-    )
+    stitched = stitch_predictions(quarterly, all_preds)
 
     # ── 4. Grade ERA5-Basin (fonte de verdade da grade + do campo bruto) ─
     print("[corrected_grid] Carregando grade ERA5-Basin...")
@@ -293,7 +334,7 @@ def run(
     from scipy.ndimage import gaussian_filter
 
     start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
-    train_end = pd.Timestamp(TRAIN_SLICE[1])
+    train_start, train_end = pd.Timestamp(TRAIN_SLICE[0]), pd.Timestamp(TRAIN_SLICE[1])
     years = range(start_ts.year, end_ts.year + 1)
     created: list[str] = []
 
@@ -339,7 +380,11 @@ def run(
 
         era5_vals = era5_year.values.astype(np.float32)
         rajada_corrigida = np.clip(era5_vals + bias_grid, 0, None)
-        in_sample = np.asarray(dates <= train_end)
+        # Antes deste fix, in_sample = dates <= train_end (só o limite
+        # superior) — marcava 2000-2007 como in_sample=True mesmo quando
+        # TRAIN_SLICE começava em 2008, dando a entender que o modelo tinha
+        # visto dado que na verdade nunca esteve em nenhum split de treino.
+        in_sample = np.asarray((dates >= train_start) & (dates <= train_end))
 
         ds_out = xr.Dataset(
             {

@@ -926,6 +926,99 @@ def _build_aggregate(
 
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
+def load_lazy_training_frame(
+    raw_dir: str, shp_dir: str, feature_groups: str,
+    restrict_coverage: bool = False, cluster_merge=None,
+) -> pd.DataFrame:
+    """NetCDF → clusters → climatologia → dataframe de features → cobertura
+    → merge de clusters. Extraído de `run()` sem mudança de lógica."""
+    print("[lazy_clusters] Carregando NetCDF...")
+    ds_inmet, ds_era5 = NetCDFLoader(raw_dir).load_extended()
+    print(f"  Estações: {len(ds_inmet.estacao.values)} | ERA5 features: {list(ds_era5.data_vars)}")
+
+    print("[lazy_clusters] Atribuindo clusters...")
+    station_clusters = assign_station_clusters(ds_inmet, shp_dir)
+    print(station_clusters.to_string(index=False))
+
+    print("[lazy_clusters] Calculando climatologia...")
+    ds_clim = get_climatology(ds_inmet, TARGET_VAR, slice(*TRAIN_SLICE))
+
+    print("[lazy_clusters] Construindo DataFrame de features...")
+    df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
+    print(f"  Shape total: {df.shape}")
+    if restrict_coverage:
+        df = restrict_to_feature_coverage(df, feature_groups)
+
+    merge_groups = parse_cluster_merge(cluster_merge)
+    if merge_groups:
+        df = apply_cluster_merge(df, merge_groups)
+        labels = sorted("-".join(str(m) for m in sorted(g)) for g in merge_groups)
+        print(f"[lazy_clusters] Agregando clusters: {', '.join(labels)}")
+
+    return df
+
+
+def run_cluster_season_loop(
+    df: pd.DataFrame, synth_df, manager, plt, *,
+    cluster_id=None, stratify_seasons: bool = True, n_neighbor_clusters: int = 1,
+    synth_n_above=None, synth_n_below: int = 0, extreme_percentile: float = 0.90,
+    eval_window: str = "monthly", active_features=None,
+    validation_mode: str = "temporal", spatial_n_folds: int = 5, spatial_seed: int = 42,
+) -> None:
+    """Loop cluster × trimestre chamando `_process_one_cluster` (já
+    resume-safe — pula se o parcial já existe em disco). Extraído de
+    `run()` sem mudança de lógica; recebe `manager`/`plt` já construídos
+    pelo chamador (não reconstrói — mesmo `ArtifactManager` usado antes e
+    depois do loop)."""
+    clusters_present = sorted(df["cluster_id"].unique(), key=lambda c: str(c))
+    print(f"EXP_NAME:{manager.root.name}")
+    print("CLUSTERS_JSON:" + json.dumps([str(c) for c in clusters_present]))
+
+    if cluster_id is not None:
+        targets = [c for c in clusters_present if str(c) == str(cluster_id)]
+        if not targets:
+            print(f"[lazy_clusters] Cluster {cluster_id} não encontrado.")
+            return
+    else:
+        targets = clusters_present
+
+    from src.pipelines.common import SEASONS as _SEASONS
+    season_list = ([None] + list(_SEASONS.keys())) if stratify_seasons else [None]
+
+    neighbors = _compute_cluster_neighbors(df, n_neighbor_clusters)
+    if neighbors:
+        for cid, nbrs in neighbors.items():
+            print(f"[lazy_clusters] Vizinhos de {cid}: {nbrs}")
+
+    for cid in targets:
+        group = df[df["cluster_id"].astype(str) == str(cid)]
+        nbr_ids = neighbors.get(cid, [])
+        neighbor_data = (
+            df[df["cluster_id"].isin(nbr_ids)] if nbr_ids else None
+        )
+        for season in season_list:
+            label = f"Cluster {cid}" + (f" / {season}" if season else "")
+            slug = f"c{cid}" + (f"_{season}" if season else "")
+            partial_path = manager.get_partial_path("clusters", f"cluster_{slug}.csv")
+            if partial_path.exists():
+                print(f"── {label}: resultado já salvo ({partial_path.name}) — pulando ──")
+                continue
+            print(f"── {label} | {group['estacao'].nunique()} estação(ões) ──")
+            _process_one_cluster(
+            cid, group, synth_df, manager, plt,
+            synth_n_above=synth_n_above,
+            synth_n_below=synth_n_below,
+            extreme_percentile=extreme_percentile,
+            season=season,
+            neighbor_data=neighbor_data,
+            eval_window=eval_window,
+            active_features=active_features,
+            validation_mode=validation_mode,
+            spatial_n_folds=spatial_n_folds,
+            spatial_seed=spatial_seed,
+        )
+
+
 def run(
     raw_dir: str = "dataset/raw",
     shp_dir: str = "dataset/shp",
@@ -995,77 +1088,20 @@ def run(
         synth_df = pd.read_csv(synthetic_csv)
         print(f"[lazy_clusters] Augment: {len(synth_df)} linhas sintéticas de {synthetic_csv}")
 
-    print("[lazy_clusters] Carregando NetCDF...")
-    ds_inmet, ds_era5 = NetCDFLoader(raw_dir).load_extended()
-    print(f"  Estações: {len(ds_inmet.estacao.values)} | ERA5 features: {list(ds_era5.data_vars)}")
+    df = load_lazy_training_frame(
+        raw_dir, shp_dir, feature_groups,
+        restrict_coverage=restrict_coverage, cluster_merge=cluster_merge,
+    )
 
-    print("[lazy_clusters] Atribuindo clusters...")
-    station_clusters = assign_station_clusters(ds_inmet, shp_dir)
-    print(station_clusters.to_string(index=False))
-
-    print("[lazy_clusters] Calculando climatologia...")
-    ds_clim = get_climatology(ds_inmet, TARGET_VAR, slice(*TRAIN_SLICE))
-
-    print("[lazy_clusters] Construindo DataFrame de features...")
-    df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
-    print(f"  Shape total: {df.shape}")
-    if restrict_coverage:
-        df = restrict_to_feature_coverage(df, feature_groups)
-
-    merge_groups = parse_cluster_merge(cluster_merge)
-    if merge_groups:
-        df = apply_cluster_merge(df, merge_groups)
-        labels = sorted("-".join(str(m) for m in sorted(g)) for g in merge_groups)
-        print(f"[lazy_clusters] Agregando clusters: {', '.join(labels)}")
-
-    clusters_present = sorted(df["cluster_id"].unique(), key=lambda c: str(c))
-
-    print(f"EXP_NAME:{manager.root.name}")
-    print("CLUSTERS_JSON:" + json.dumps([str(c) for c in clusters_present]))
-
-    if cluster_id is not None:
-        targets = [c for c in clusters_present if str(c) == str(cluster_id)]
-        if not targets:
-            print(f"[lazy_clusters] Cluster {cluster_id} não encontrado.")
-            return None
-    else:
-        targets = clusters_present
-
-    from src.pipelines.common import SEASONS as _SEASONS
-    season_list = ([None] + list(_SEASONS.keys())) if stratify_seasons else [None]
-
-    neighbors = _compute_cluster_neighbors(df, n_neighbor_clusters)
-    if neighbors:
-        for cid, nbrs in neighbors.items():
-            print(f"[lazy_clusters] Vizinhos de {cid}: {nbrs}")
-
-    for cid in targets:
-        group = df[df["cluster_id"].astype(str) == str(cid)]
-        nbr_ids = neighbors.get(cid, [])
-        neighbor_data = (
-            df[df["cluster_id"].isin(nbr_ids)] if nbr_ids else None
-        )
-        for season in season_list:
-            label = f"Cluster {cid}" + (f" / {season}" if season else "")
-            slug = f"c{cid}" + (f"_{season}" if season else "")
-            partial_path = manager.get_partial_path("clusters", f"cluster_{slug}.csv")
-            if partial_path.exists():
-                print(f"── {label}: resultado já salvo ({partial_path.name}) — pulando ──")
-                continue
-            print(f"── {label} | {group['estacao'].nunique()} estação(ões) ──")
-            _process_one_cluster(
-            cid, group, synth_df, manager, plt,
-            synth_n_above=synth_n_above,
-            synth_n_below=synth_n_below,
-            extreme_percentile=extreme_percentile,
-            season=season,
-            neighbor_data=neighbor_data,
-            eval_window=eval_window,
-            active_features=active_features,
-            validation_mode=validation_mode,
-            spatial_n_folds=spatial_n_folds,
-            spatial_seed=spatial_seed,
-        )
+    run_cluster_season_loop(
+        df, synth_df, manager, plt,
+        cluster_id=cluster_id, stratify_seasons=stratify_seasons,
+        n_neighbor_clusters=n_neighbor_clusters,
+        synth_n_above=synth_n_above, synth_n_below=synth_n_below,
+        extreme_percentile=extreme_percentile, eval_window=eval_window,
+        active_features=active_features, validation_mode=validation_mode,
+        spatial_n_folds=spatial_n_folds, spatial_seed=spatial_seed,
+    )
 
     if cluster_id is None:
         _build_aggregate(

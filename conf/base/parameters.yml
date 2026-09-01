@@ -1,0 +1,17 @@
+raw_dir: dataset/raw
+shp_dir: dataset/shp
+feature_groups: original
+lstm_config_path: config/experiment_cluster_lstm_modal.yaml
+artifacts_root: artifacts
+metric: R2
+start_date: "2000-01-08"
+end_date: "2025-12-31"
+corrected_grid_out_dir: artifacts/corrected_grid
+
+# Pipeline "lazy_amostra" (kedro run --pipeline=lazy_amostra) — roda de
+# verdade, mas restrita a 1 cluster e a uma amostra mínima de linhas, só
+# pra inspecionar o formato dos dados em cada passo (kedro viz preview).
+# Nunca usar esses valores fora dessa pipeline de demonstração.
+lazy_sample_cluster_id: "1"
+lazy_sample_n_rows: 300
+lazy_sample_output_dir: artifacts/lazy_amostra/lazy_clusters

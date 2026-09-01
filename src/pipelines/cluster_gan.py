@@ -59,26 +59,15 @@ def _plot_synthetic_vs_real(y_real: np.ndarray, y_synth: np.ndarray, manager, pl
     print(f"[cluster_gan] Distribuição salva: {path}")
 
 
-def run(
-    raw_dir: str = "dataset/raw",
-    shp_dir: str = "dataset/shp",
-    output_dir: str = "artifacts/gan_clusters",
-    exp_name: str | None = None,
-    epochs: int = 300,
-    extreme_percentile: float = 90.0,
-    n_per_cluster: int | None = None,
-    n_per_cluster_ratio: float | None = 0.3,
-    include_season: bool = False,
-    cluster_merge: str | None = None,
-    **_,
-) -> pd.DataFrame:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    manager = ArtifactManager(output_dir, exp_name)
-    print(f"[cluster_gan] Experimento: {manager.root}")
-
+def fit_gan(
+    raw_dir: str, shp_dir: str, cluster_merge: str | None,
+    extreme_percentile: float, epochs: int, include_season: bool,
+) -> tuple[TabularExtremeGANAugmenter, dict, np.ndarray]:
+    """Carrega os dados, monta o pool de treino por cluster e ajusta o GAN
+    condicional (EVT/GPD + WGAN-GP). Extraído de `run()` sem mudança de
+    lógica — `TabularExtremeGANAugmenter` já tinha fit/generate separados
+    (`src/pipeline/augmentation/tabular_gan_augmenter.py`), só a orquestração
+    ao redor estava tudo dentro de `run()`."""
     print("[cluster_gan] Carregando NetCDF...")
     ds_inmet, ds_era5 = NetCDFLoader(raw_dir).load_extended()
 
@@ -125,6 +114,17 @@ def run(
     )
     augmenter.fit(y_train_all, cluster_ids_all, season_labels_all)
 
+    return augmenter, df_tr_by_cluster, y_train_all
+
+
+def generate_and_save(
+    augmenter: TabularExtremeGANAugmenter, df_tr_by_cluster: dict, y_train_all: np.ndarray,
+    *, n_per_cluster: int | None, n_per_cluster_ratio: float | None, include_season: bool,
+    cluster_merge: str | None, epochs: int, extreme_percentile: float, manager, plt,
+) -> pd.DataFrame:
+    """Gera as amostras sintéticas do GAN já ajustado, atribui features reais
+    por nearest-neighbor, salva o CSV + relatório de diagnóstico. Extraído de
+    `run()` sem mudança de lógica."""
     n_gen_by_cluster = {}
     for cid, df_tr in df_tr_by_cluster.items():
         n_gen_by_cluster[cid] = (
@@ -203,3 +203,36 @@ def run(
     })
 
     return synthetic_df
+
+
+def run(
+    raw_dir: str = "dataset/raw",
+    shp_dir: str = "dataset/shp",
+    output_dir: str = "artifacts/gan_clusters",
+    exp_name: str | None = None,
+    epochs: int = 300,
+    extreme_percentile: float = 90.0,
+    n_per_cluster: int | None = None,
+    n_per_cluster_ratio: float | None = 0.3,
+    include_season: bool = False,
+    cluster_merge: str | None = None,
+    **_,
+) -> pd.DataFrame:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    manager = ArtifactManager(output_dir, exp_name)
+    print(f"[cluster_gan] Experimento: {manager.root}")
+
+    augmenter, df_tr_by_cluster, y_train_all = fit_gan(
+        raw_dir, shp_dir, cluster_merge, extreme_percentile, epochs, include_season,
+    )
+
+    return generate_and_save(
+        augmenter, df_tr_by_cluster, y_train_all,
+        n_per_cluster=n_per_cluster, n_per_cluster_ratio=n_per_cluster_ratio,
+        include_season=include_season, cluster_merge=cluster_merge,
+        epochs=epochs, extreme_percentile=extreme_percentile,
+        manager=manager, plt=plt,
+    )

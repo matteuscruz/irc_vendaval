@@ -204,13 +204,20 @@ def restrict_to_feature_coverage(df: pd.DataFrame, feature_groups: str | None) -
 # A partir de 2025-08, INMET_Stratified.nc passou a vir de
 # Training_Dataset_INMET_ERA5_Paired.csv (271 estações na bacia, real desde
 # 2000) em vez do antigo arquivo que só cobria 2020-2024 — ver
-# scripts/build_inmet_from_paired_csv.py. A rede só fica robusta (170+
-# estações simultâneas, ver validação no PR) a partir de 2008; antes disso
-# a cobertura é esparsa demais (2 estações em 2000, 16 em 2002) pra treinar
-# sem viesar. TEST começa em 2020 pra bater com o período que os modelos
-# antigos (treinados só em 2020-2022) já foram avaliados, permitindo
-# comparação direta de métricas entre a rede antiga e a nova.
-TRAIN_SLICE = ("2008-01-01", "2018-12-31")
+# scripts/build_inmet_from_paired_csv.py.
+#
+# ATUALIZADO 2026-09-01: TRAIN_SLICE estendido pra incluir 2000-2007
+# deliberadamente, apesar de um comentário anterior aqui (removido nesta
+# mudança, ver git blame) dizer que isso já tinha sido testado e viesava o
+# modelo — o PR referenciado por esse comentário não pôde ser recuperado
+# (histórico git deste repo foi reconstruído após perda local, ver commit
+# "recover project state after local .git loss"), então essa alegação não
+# pôde ser reverificada. Decisão explícita do usuário de re-treinar mesmo
+# assim e comparar métricas antes/depois pra confirmar ou refutar o viés.
+# Cobertura de estações é esparsa em 2000-2007 (2 em 2000, 16 em 2002, 170+
+# só a partir de 2008) — se as métricas de validação piorarem depois desta
+# mudança, esse é o motivo mais provável.
+TRAIN_SLICE = ("2000-01-01", "2018-12-31")
 VAL_SLICE   = ("2019-01-01", "2019-12-31")
 TEST_SLICE  = ("2020-01-01", "2025-12-31")
 
@@ -230,8 +237,20 @@ def build_flat_dataframe(
     ds_era5: Any,
     station_clusters: pd.DataFrame,
     ds_clim: Any,
+    require_target: bool = True,
 ) -> pd.DataFrame:
-    """DataFrame tabular: features ERA5 + target INMET + cluster."""
+    """DataFrame tabular: features ERA5 + target INMET + cluster.
+
+    `require_target`: True (default, usado pelo treino) descarta linhas sem
+    `TARGET_VAR` — necessário pra treinar/avaliar contra um alvo real. Os
+    correctors de inferência (SpatialCorrector/DLSpatialCorrector) passam
+    `require_target=False`: eles só usam features derivadas do ERA5 pra
+    prever (o alvo INMET nunca é insumo do modelo, só serviria de
+    comparação) — descartar linhas sem alvo aqui jogava fora exatamente as
+    estações/dias sem observação INMET real (ex.: quase toda a grade em
+    2000-2006, quando pouquíssimas estações estavam ativas), impedindo a
+    extrapolação para justamente os anos sem dado real — o objetivo central
+    da correção."""
     df_feat = ds_era5.to_dataframe().reset_index()
     df_targ = ds_inmet[[TARGET_VAR]].to_dataframe().reset_index()
 
@@ -239,7 +258,8 @@ def build_flat_dataframe(
         df_feat, df_targ, on=["time", "estacao"],
         how="inner", validate="one_to_one",
     )
-    df = df.dropna(subset=[TARGET_VAR])
+    if require_target:
+        df = df.dropna(subset=[TARGET_VAR])
 
     doy = df["time"].dt.dayofyear
     df["day_sin"] = np.sin(2 * np.pi * doy / 365.25)

@@ -116,50 +116,18 @@ def _plot_train_distribution(data: list[dict], manager, plt) -> None:
 
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
-def run(
-    raw_dir: str = "dataset/raw",
-    shp_dir: str = "dataset/shp",
-    output_dir: str = "artifacts/mlp_clusters",
-    hidden_layers: tuple = (128, 64),
-    alpha: float = 0.001,
-    extreme_power: float = 2.0,
-    max_iter: int = 500,
-    cluster_merge = None,
-    synthetic_csv = None,
-    exp_name = None,
-    feature_groups: str = "original,era5_18z,bt55",
-    restrict_coverage: bool = False,
-    ablation_group: str | None = None,
-    validation_mode: str = "temporal",
-    spatial_n_folds: int = 5,
-    spatial_seed: int = 42,
-    **_,
-) -> pd.DataFrame:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from matplotlib.backends.backend_pdf import PdfPages
-    import shap
-
-    manager = ArtifactManager(output_dir, exp_name)
-    out = manager.root
-    cluster_plots_dir = manager.get_plot_dir("clusters")
-    print(f"[mlp_clusters] Experimento: {out}")
-
-    active_features = resolve_feature_groups(feature_groups)
-    if "wind_mag_max" not in active_features:
-        raise ValueError(
-            "feature_groups precisa incluir 'original' — 'wind_mag_max' é "
-            "usado incondicionalmente no plot de fator de correção ERA5."
-        )
-    print(f"[mlp_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
-
-    synth_df = None
-    if synthetic_csv:
-        synth_df = pd.read_csv(synthetic_csv)
-        print(f"[mlp_clusters] Augment: {len(synth_df)} linhas sintéticas de {synthetic_csv}")
-
+def load_mlp_training_frame(
+    raw_dir: str, shp_dir: str, feature_groups: str,
+    restrict_coverage: bool = False, cluster_merge=None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """NetCDF → clusters → climatologia ERA5 → dataframe de features →
+    cobertura → merge de clusters, + metadados de estação (lat/lon/cluster).
+    Extraído de `run()` sem mudança de lógica. Retorna `(df, stations_meta)`
+    — a escrita de `stations_metadata.csv` continua no chamador (que já tem
+    o `ArtifactManager` construído); este split é deliberadamente raso —
+    não decompõe o loop por cluster nem a agregação (ver T3.1 do plano:
+    `cluster_mlp.py` não tem `_process_one_cluster` equivalente, decompor
+    o resto exigiria escrever código novo, não só extrair)."""
     print("[mlp_clusters] Carregando NetCDF...")
     ds_inmet, ds_era5 = NetCDFLoader(raw_dir).load_extended()
     print(f"  Estações: {len(ds_inmet.estacao.values)} | ERA5 features: {list(ds_era5.data_vars)}")
@@ -189,8 +157,71 @@ def run(
         .groupby("estacao").first().reset_index()
     )
     stations_meta = station_clusters.merge(stations_latlon, on="estacao", how="left")
+
+    return df, stations_meta
+
+
+def run(
+    raw_dir: str = "dataset/raw",
+    shp_dir: str = "dataset/shp",
+    output_dir: str = "artifacts/mlp_clusters",
+    hidden_layers: tuple = (128, 64),
+    alpha: float = 0.001,
+    extreme_power: float = 2.0,
+    max_iter: int = 500,
+    cluster_merge = None,
+    synthetic_csv = None,
+    exp_name = None,
+    feature_groups: str = "original,era5_18z,bt55",
+    restrict_coverage: bool = False,
+    ablation_group: str | None = None,
+    validation_mode: str = "temporal",
+    spatial_n_folds: int = 5,
+    spatial_seed: int = 42,
+    precomputed_frame: tuple[pd.DataFrame, pd.DataFrame] | None = None,
+    **_,
+) -> pd.DataFrame:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib.backends.backend_pdf import PdfPages
+    import shap
+
+    manager = ArtifactManager(output_dir, exp_name)
+    out = manager.root
+    cluster_plots_dir = manager.get_plot_dir("clusters")
+    print(f"[mlp_clusters] Experimento: {out}")
+
+    active_features = resolve_feature_groups(feature_groups)
+    if "wind_mag_max" not in active_features:
+        raise ValueError(
+            "feature_groups precisa incluir 'original' — 'wind_mag_max' é "
+            "usado incondicionalmente no plot de fator de correção ERA5."
+        )
+    print(f"[mlp_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
+
+    synth_df = None
+    if synthetic_csv:
+        synth_df = pd.read_csv(synthetic_csv)
+        print(f"[mlp_clusters] Augment: {len(synth_df)} linhas sintéticas de {synthetic_csv}")
+
+    # precomputed_frame (Kedro): se já veio pronto de load_mlp_training_frame,
+    # não recarrega — nenhum chamador existente (CLI/Modal) passa esse
+    # parâmetro, comportamento 100% inalterado pra eles (mesmo padrão do
+    # precomputed_winner_table em grid_generator.run()).
+    if precomputed_frame is not None:
+        df, stations_meta = precomputed_frame
+    else:
+        df, stations_meta = load_mlp_training_frame(
+            raw_dir, shp_dir, feature_groups,
+            restrict_coverage=restrict_coverage, cluster_merge=cluster_merge,
+        )
     stations_meta.to_csv(manager.get_partial_path("csv", "stations_metadata.csv"), index=False)
     print(f"  Estações: {len(stations_meta)}")
+    # recomputa (barato, parser puro) — precisado só pro meta.json no final,
+    # não vale a pena mudar a assinatura de load_mlp_training_frame por isso.
+    merge_groups = parse_cluster_merge(cluster_merge)
 
     all_rows, all_importances, all_preds, fig_list = [], [], [], []
     unified_rows, unified_pred_rows = [], []

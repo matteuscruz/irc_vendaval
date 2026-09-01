@@ -16,12 +16,15 @@ def _load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _print_final_summary(results_df, data, result, trainer, aug_cfg=None):
-    """Resumo enriquecido após avaliação: global, por season, extremos."""
+def _print_final_summary(results_df, data, preds, aug_cfg=None):
+    """Resumo enriquecido após avaliação: global, por season, extremos.
+    `preds` já vem calculado pelo chamador (`_predict_lstm_experts`) — antes
+    esta função recalculava a predição do zero com `trainer.predict(...)`,
+    uma de três chamadas redundantes com os mesmos argumentos no mesmo
+    `run()` (bug real corrigido, ver T2.2 do plano)."""
     import numpy as np
     import pandas as pd
     from sklearn.metrics import mean_squared_error
-    from src.pipeline.training.cluster_tr_trainer import ClusterTRTrainer
 
     print("\n" + "=" * 60)
     print("RESUMO FINAL")
@@ -79,25 +82,6 @@ def _print_final_summary(results_df, data, result, trainer, aug_cfg=None):
     print(ranked.tail(3)[cols].to_string(index=False))
 
     y_true_all, y_pred_all = [], []
-    if isinstance(trainer, ClusterTRTrainer):
-        preds = trainer.predict(
-            x_dict=data.x_test,
-            xs_dict=data.x_static_test,
-            models=result.models,
-            era5_dict=data.era5_test,
-            scaler_y=data.scaler_y,
-            feature_names=data.feature_names,
-            cluster_ids=data.cluster_ids,
-        )
-    else:
-        preds = trainer.predict(
-            x_dict=data.x_test,
-            models=result.models,
-            era5_dict=data.era5_test,
-            scaler_y=data.scaler_y,
-            feature_names=data.feature_names,
-            cluster_ids=data.cluster_ids,
-        )
     for season in data.x_test:
         if season not in preds:
             continue
@@ -148,9 +132,12 @@ def _print_final_summary(results_df, data, result, trainer, aug_cfg=None):
     print("=" * 60)
 
 
-def _inject_synthetic(data, synthetic_csv: str) -> None:
+def _inject_synthetic(data, synthetic_csv: str):
     """
     Injeta sintéticos (cluster_gan.py ou legado) em data.x_train/y_train/era5_train.
+    Retorna um NOVO `ClusterDataBatch` (não muta `data` — o `data` recebido
+    fica intocado, precedente já usado por `BaseAugmenter._distribute_by_season`
+    via `dataclasses.replace`, `src/pipeline/augmentation/base.py:161`).
 
     data.x_train/y_train são indexados por SEASON (DJF/MAM/JJA/SON), não por
     cluster_id — o cluster é codificado como coluna one-hot embutida no
@@ -168,9 +155,18 @@ def _inject_synthetic(data, synthetic_csv: str) -> None:
     a partir do valor ERA5 emprestado — preserva features realistas e
     ancoragem ERA5 consistente com o que o resto do pipeline espera.
     """
+    import dataclasses
+
     import numpy as np
     import pandas as pd
     from src.pipeline.data.cluster_preprocessor import SEASONS
+
+    # Cópias rasas dos dicts — as entradas (arrays por season) só são
+    # substituídas, nunca mutadas in-place, então `data.x_train` original
+    # (e as demais seasons não tocadas) seguem intactas.
+    new_x_train = dict(data.x_train)
+    new_y_train = dict(data.y_train)
+    new_era5_train = dict(data.era5_train)
 
     synth = pd.read_csv(synthetic_csv)
     target_col = (
@@ -201,8 +197,8 @@ def _inject_synthetic(data, synthetic_csv: str) -> None:
         season_synth = grp["season"].to_numpy() if has_season_col else None
 
         counts = {
-            s: int(np.sum(data.x_train[s][:, -1, col_idx] == 1))
-            for s in season_list if s in data.x_train and len(data.x_train[s])
+            s: int(np.sum(new_x_train[s][:, -1, col_idx] == 1))
+            for s in season_list if s in new_x_train and len(new_x_train[s])
         }
         total = sum(counts.values())
         if total == 0:
@@ -216,19 +212,19 @@ def _inject_synthetic(data, synthetic_csv: str) -> None:
             season_assign = rng.choice(avail_seasons, size=len(y_synth_abs), p=probs)
 
         for season in season_list:
-            if season not in data.x_train or len(data.x_train[season]) == 0:
+            if season not in new_x_train or len(new_x_train[season]) == 0:
                 continue
             y_s = y_synth_abs[season_assign == season]
             if len(y_s) == 0:
                 continue
 
-            mask_real = data.x_train[season][:, -1, col_idx] == 1
+            mask_real = new_x_train[season][:, -1, col_idx] == 1
             if not np.any(mask_real):
                 continue
 
-            x_real = data.x_train[season][mask_real]
-            y_real_scaled = data.y_train[season][mask_real]
-            era5_real = data.era5_train[season][mask_real]
+            x_real = new_x_train[season][mask_real]
+            y_real_scaled = new_y_train[season][mask_real]
+            era5_real = new_era5_train[season][mask_real]
             era5_real_safe = np.clip(era5_real, 0.1, None)
             y_real_abs = (
                 data.scaler_y.inverse_transform(y_real_scaled).flatten() * era5_real_safe
@@ -243,9 +239,9 @@ def _inject_synthetic(data, synthetic_csv: str) -> None:
             ratio_new = (y_s / np.clip(era5_new, 0.1, None)).reshape(-1, 1).astype("float32")
             y_new_scaled = data.scaler_y.transform(ratio_new)
 
-            data.x_train[season] = np.concatenate([data.x_train[season], x_new], axis=0)
-            data.y_train[season] = np.concatenate([data.y_train[season], y_new_scaled], axis=0)
-            data.era5_train[season] = np.concatenate([data.era5_train[season], era5_new], axis=0)
+            new_x_train[season] = np.concatenate([new_x_train[season], x_new], axis=0)
+            new_y_train[season] = np.concatenate([new_y_train[season], y_new_scaled], axis=0)
+            new_era5_train[season] = np.concatenate([new_era5_train[season], era5_new], axis=0)
             # NOTA: data.meta_train[season] (estacao/lat/lon/time por janela)
             # não é estendido aqui — fica desalinhado com x_train/y_train/
             # era5_train após a injeção. Inofensivo hoje (só meta_test é lido,
@@ -259,18 +255,32 @@ def _inject_synthetic(data, synthetic_csv: str) -> None:
         f" injetados de {synthetic_csv}"
     )
 
+    return dataclasses.replace(
+        data, x_train=new_x_train, y_train=new_y_train, era5_train=new_era5_train,
+    )
 
-def run(
+
+def preprocess_lstm_data(
     config: str,
     augmentation_method: str | None = None,
     synthetic_csv: str | None = None,
     feature_groups: str | None = None,
     restrict_coverage: bool = False,
-    ablation_group: str | None = None,
     exp_name_override: str | None = None,
-    **_,
-) -> None:
-    """Executa o pipeline dual-head LSTM por cluster via YAML config."""
+):
+    """Carrega o YAML, roda `ClusterPreprocessor` (NetCDF → clusters →
+    climatologia → dataframe → split → scaler/imputer → janelas) e injeta
+    sintéticos (se houver). Extraído de `run()` sem mudança de lógica —
+    `ClusterPreprocessor.run()` já era uma classe/método independente, só a
+    orquestração ao redor (config, ArtifactManager, override de CLI) estava
+    tudo dentro de `run()`.
+
+    Retorna `(data, resolved_exp_name, cfg)` — `resolved_exp_name` é o nome
+    já resolvido pelo `ArtifactManager` (auto-incrementado se `exp_name` era
+    None): quem for treinar a partir daqui deve reconstruir o
+    `ArtifactManager` com esse nome explícito, nunca `None` de novo, senão
+    resolve pra um `expN+1` novo e desalinha do que foi pré-processado aqui.
+    """
     cfg = _load_config(config)
 
     if augmentation_method and "augmentation" in cfg:
@@ -279,9 +289,6 @@ def run(
     exp_cfg = cfg["experiment"]
     data_cfg = cfg["data"]
     prep_cfg = cfg["preprocessing"]
-    model_cfg = cfg["model"]
-    train_cfg = cfg["training"]
-    viz_cfg = cfg.get("visualization", {})
 
     # CLI sobrepõe o YAML (mesmo padrão de augmentation_method acima) —
     # feature_groups=None mantém o que estiver em data.feature_groups
@@ -317,7 +324,59 @@ def run(
     data = preprocessor.run()
 
     if synthetic_csv:
-        _inject_synthetic(data, synthetic_csv)
+        data = _inject_synthetic(data, synthetic_csv)
+
+    return data, manager.exp_dir.name, cfg
+
+
+def _predict_lstm_experts(data, result, trainer, model_name: str) -> dict:
+    """Prediz com os especialistas já treinados. Extraído pra rodar uma
+    única vez — antes `trainer.predict(...)` era chamado 3x com os mesmos
+    argumentos dentro do mesmo `run()` (dentro de
+    `ClusterMetricsEvaluator.evaluate`, dentro de `_print_final_summary`, e
+    de novo aqui) — mesmo resultado, recomputado do zero cada vez (bug
+    real corrigido, ver T2.2 do plano)."""
+    if model_name == "cluster_tr_lstm":
+        return trainer.predict(
+            x_dict=data.x_test,
+            xs_dict=data.x_static_test,
+            models=result.models,
+            era5_dict=data.era5_test,
+            scaler_y=data.scaler_y,
+            feature_names=data.feature_names,
+            cluster_ids=data.cluster_ids,
+        )
+    return trainer.predict(
+        x_dict=data.x_test,
+        models=result.models,
+        era5_dict=data.era5_test,
+        scaler_y=data.scaler_y,
+        feature_names=data.feature_names,
+        cluster_ids=data.cluster_ids,
+    )
+
+
+def train_lstm_and_finalize(
+    data, resolved_exp_name: str, cfg: dict, config: str,
+    synthetic_csv: str | None = None, ablation_group: str | None = None,
+) -> None:
+    """Treina os especialistas, avalia, serializa modelos e exporta
+    predições/gráficos. Extraído de `run()` sem mudança de lógica, exceto a
+    correção do predict redundante (ver `_predict_lstm_experts`).
+    `resolved_exp_name` reconstrói o `ArtifactManager` no MESMO diretório
+    que `preprocess_lstm_data` já resolveu (nunca `exp_name=None` de novo —
+    ver docstring de `preprocess_lstm_data`)."""
+    exp_cfg = cfg["experiment"]
+    data_cfg = cfg["data"]
+    prep_cfg = cfg["preprocessing"]
+    model_cfg = cfg["model"]
+    train_cfg = cfg["training"]
+    viz_cfg = cfg.get("visualization", {})
+    feature_groups = data_cfg.get("feature_groups")
+
+    from src.utils.artifact_manager import ArtifactManager
+    manager = ArtifactManager(exp_cfg["output_dir"], exp_name=resolved_exp_name)
+    output_dir = manager.root
 
     model_params = model_cfg.get("params", {})
     model_name = model_cfg.get("name", "cluster_dual_head_lstm")
@@ -394,8 +453,9 @@ def run(
     from src.pipeline.validation.cluster_metrics import ClusterMetricsEvaluator
 
     print("\n[eval] Avaliando no conjunto de teste...")
+    preds = _predict_lstm_experts(data, result, trainer, model_name)
     evaluator = ClusterMetricsEvaluator()
-    results_df = evaluator.evaluate(data, result, trainer)
+    results_df = evaluator.evaluate(data, result, preds)
     print(results_df.to_string(index=False))
 
     results_path = manager.get_partial_path("csv", "results.csv")
@@ -434,7 +494,7 @@ def run(
         index_path = manager.append_experiments_index(unified_results_df)
         print(f"Índice atualizado: {index_path}")
 
-    _print_final_summary(results_df, data, result, trainer, aug_cfg)
+    _print_final_summary(results_df, data, preds, aug_cfg)
 
     # ── Serializar Modelos para Inferência Espacial ───────────────────────
     import joblib
@@ -474,26 +534,9 @@ def run(
         get_cluster_season_arrays, get_cluster_season_station_arrays,
     )
 
-    if model_name == "cluster_tr_lstm":
-        preds = trainer.predict(
-            x_dict=data.x_test,
-            xs_dict=data.x_static_test,
-            models=result.models,
-            era5_dict=data.era5_test,
-            scaler_y=data.scaler_y,
-            feature_names=data.feature_names,
-            cluster_ids=data.cluster_ids,
-        )
-    else:
-        preds = trainer.predict(
-            x_dict=data.x_test,
-            models=result.models,
-            era5_dict=data.era5_test,
-            scaler_y=data.scaler_y,
-            feature_names=data.feature_names,
-            cluster_ids=data.cluster_ids,
-        )
-
+    # `preds` já foi calculado acima (ver `_predict_lstm_experts`) — reusa
+    # em vez de chamar `trainer.predict(...)` uma terceira vez com os
+    # mesmos argumentos.
     pred_frames = []
     station_pred_frames = []
     for season in data.x_test:
@@ -553,3 +596,25 @@ def run(
 
     manager.get_root_path("config.yaml").write_text(Path(config).read_text())
     print(f"\n=== Pipeline concluído. Artefatos em: {output_dir} ===")
+
+
+def run(
+    config: str,
+    augmentation_method: str | None = None,
+    synthetic_csv: str | None = None,
+    feature_groups: str | None = None,
+    restrict_coverage: bool = False,
+    ablation_group: str | None = None,
+    exp_name_override: str | None = None,
+    **_,
+) -> None:
+    """Executa o pipeline dual-head LSTM por cluster via YAML config —
+    composição de `preprocess_lstm_data` + `train_lstm_and_finalize`
+    (extraídas sem mudança de comportamento; ver as duas pra detalhe)."""
+    data, resolved_exp_name, cfg = preprocess_lstm_data(
+        config, augmentation_method, synthetic_csv, feature_groups,
+        restrict_coverage, exp_name_override,
+    )
+    train_lstm_and_finalize(
+        data, resolved_exp_name, cfg, config, synthetic_csv, ablation_group,
+    )

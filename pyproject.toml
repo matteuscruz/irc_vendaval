@@ -37,6 +37,14 @@ dev = [
     "modal>=0.73.0",
 ]
 
+[tool.kedro]
+package_name = "irc_vendaval_kedro"
+project_name = "IRC Vendaval"
+kedro_init_version = "1.5.0"
+tools = []
+example_pipeline = "False"
+source_dir = "src"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -52,3 +60,6 @@ pythonpath = ["."]
 dev = [
     "modal>=1.4.2",
 ]
+
+[tool.kedro_telemetry]
+project_id = "d877742e52374b0e9f184f40510f6f6d"

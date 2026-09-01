@@ -107,7 +107,9 @@ class DLSpatialCorrector(SpatialCorrector):
         ds_clim = get_climatology(ds_era5, ERA5_GUST_PROXY, slice(*TRAIN_SLICE))
 
         print("[DLSpatialCorrector] Construindo DataFrame flat...")
-        self.df_all = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
+        self.df_all = build_flat_dataframe(
+            ds_inmet, ds_era5, station_clusters, ds_clim, require_target=False,
+        )
         print(f"  Shape: {self.df_all.shape}")
 
         # Fechar os handles xarray/netCDF4 — ver comentário equivalente em

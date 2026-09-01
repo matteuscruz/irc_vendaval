@@ -199,7 +199,9 @@ class SpatialCorrector:
         ds_clim = get_climatology(ds_inmet, TARGET_VAR, slice(*TRAIN_SLICE))
 
         print("[SpatialCorrector] Construindo DataFrame flat...")
-        self.df_all = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
+        self.df_all = build_flat_dataframe(
+            ds_inmet, ds_era5, station_clusters, ds_clim, require_target=False,
+        )
 
         # self.df_all já tem tudo que precisamos (pandas puro) — fechar os
         # handles xarray/netCDF4 aqui. Sem isso, cada Corrector instanciado

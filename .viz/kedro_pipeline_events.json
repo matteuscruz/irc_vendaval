@@ -1,0 +1,92 @@
+[
+  {
+    "event": "before_pipeline_run",
+    "timestamp": "2026-09-01T12:01:21.531637+00:00"
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "params:raw_dir",
+    "node_id": "bf90a43c",
+    "status": "Available",
+    "size": 0
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "params:shp_dir",
+    "node_id": "b67b5258",
+    "status": "Available",
+    "size": 0
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "params:feature_groups",
+    "node_id": "55dbf26d",
+    "status": "Available",
+    "size": 0
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "params:lazy_sample_cluster_id",
+    "node_id": "1da2ad8a",
+    "status": "Available",
+    "size": 0
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "params:lazy_sample_n_rows",
+    "node_id": "3228b733",
+    "status": "Available",
+    "size": 0
+  },
+  {
+    "event": "after_node_run",
+    "node": "load_lazy_training_frame_sample",
+    "node_id": "9af868d0",
+    "duration": 146.36730123300003,
+    "status": "success"
+  },
+  {
+    "event": "after_dataset_saved",
+    "dataset": "lazy_training_frame_sample",
+    "node_id": "366054e8",
+    "status": "Available",
+    "size": 189586
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "lazy_training_frame_sample",
+    "node_id": "366054e8",
+    "status": "Available",
+    "size": 189586
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "params:lazy_sample_cluster_id",
+    "node_id": "1da2ad8a",
+    "status": "Available",
+    "size": 0
+  },
+  {
+    "event": "after_dataset_loaded",
+    "dataset": "params:lazy_sample_output_dir",
+    "node_id": "307a754a",
+    "status": "Available",
+    "size": 0
+  },
+  {
+    "event": "on_node_error",
+    "node": "run_lazy_clusters_sample",
+    "node_id": "2bf1e142",
+    "error": "Can only use .dt accessor with datetimelike values",
+    "timestamp": "2026-09-01T12:03:49.618391+00:00",
+    "traceback": "Traceback (most recent call last):\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/task.py\", line 305, in _call_node_run\n    outputs = node.run(inputs)\n              ^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/pipeline/node.py\", line 562, in run\n    raise exc\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/pipeline/node.py\", line 548, in run\n    outputs = self._run_with_list(inputs, self._inputs)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/pipeline/node.py\", line 593, in _run_with_list\n    return self._func(*(inputs[item] for item in node_inputs))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/src/irc_vendaval_kedro/nodes.py\", line 324, in run_lazy_clusters_sample\n    cluster_lazy.run_cluster_season_loop(\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/src/pipelines/cluster_lazy.py\", line 1007, in run_cluster_season_loop\n    _process_one_cluster(\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/src/pipelines/cluster_lazy.py\", line 494, in _process_one_cluster\n    month_to_season(times_train.dt.month).tolist() + synth_seasons_list\n                    ^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/pandas/core/generic.py\", line 6206, in __getattr__\n    return object.__getattribute__(self, name)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/pandas/core/accessor.py\", line 230, in __get__\n    return self._accessor(obj)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/pandas/core/indexes/accessors.py\", line 698, in __new__\n    raise AttributeError(\"Can only use .dt accessor with datetimelike values\")\nAttributeError: Can only use .dt accessor with datetimelike values\n"
+  },
+  {
+    "event": "on_pipeline_error",
+    "error": "Can only use .dt accessor with datetimelike values",
+    "timestamp": "2026-09-01T12:03:49.629761+00:00",
+    "traceback": "Traceback (most recent call last):\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/framework/session/session.py\", line 431, in run\n    run_result = runner.run(\n                 ^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/runner.py\", line 115, in run\n    self._run(pipeline, catalog, hook_or_null_manager, run_id)  # type: ignore[arg-type]\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/sequential_runner.py\", line 63, in _run\n    super()._run(\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/runner.py\", line 240, in _run\n    ).execute()\n      ^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/task.py\", line 89, in execute\n    node = self._run_node_sequential(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/task.py\", line 168, in _run_node_sequential\n    outputs = self._call_node_run(\n              ^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/task.py\", line 315, in _call_node_run\n    raise exc\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/runner/task.py\", line 305, in _call_node_run\n    outputs = node.run(inputs)\n              ^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/pipeline/node.py\", line 562, in run\n    raise exc\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/pipeline/node.py\", line 548, in run\n    outputs = self._run_with_list(inputs, self._inputs)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/kedro/pipeline/node.py\", line 593, in _run_with_list\n    return self._func(*(inputs[item] for item in node_inputs))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/src/irc_vendaval_kedro/nodes.py\", line 324, in run_lazy_clusters_sample\n    cluster_lazy.run_cluster_season_loop(\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/src/pipelines/cluster_lazy.py\", line 1007, in run_cluster_season_loop\n    _process_one_cluster(\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/src/pipelines/cluster_lazy.py\", line 494, in _process_one_cluster\n    month_to_season(times_train.dt.month).tolist() + synth_seasons_list\n                    ^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/pandas/core/generic.py\", line 6206, in __getattr__\n    return object.__getattribute__(self, name)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/pandas/core/accessor.py\", line 230, in __get__\n    return self._accessor(obj)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/media/matteuscruz/Projects/Entrep/irc_vendaval/.venv/lib/python3.11/site-packages/pandas/core/indexes/accessors.py\", line 698, in __new__\n    raise AttributeError(\"Can only use .dt accessor with datetimelike values\")\nAttributeError: Can only use .dt accessor with datetimelike values\n",
+    "node": "run_lazy_clusters_sample",
+    "node_id": "2bf1e142"
+  }
+]

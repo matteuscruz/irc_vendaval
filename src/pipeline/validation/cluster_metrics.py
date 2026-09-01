@@ -108,31 +108,17 @@ class ClusterMetricsEvaluator:
         self,
         data: ClusterDataBatch,
         result,
-        trainer,
+        preds: dict,
     ) -> pd.DataFrame:
-        """Retorna DataFrame com [cluster_id, season, n_samples, R2, RMSE, Bias, Bias_P90, RMSE_P90, Corr]."""
-        from src.pipeline.training.cluster_tr_trainer import ClusterTRTrainer
+        """Retorna DataFrame com [cluster_id, season, n_samples, R2, RMSE, Bias, Bias_P90, RMSE_P90, Corr].
 
-        if isinstance(trainer, ClusterTRTrainer):
-            preds = trainer.predict(
-                x_dict=data.x_test,
-                xs_dict=data.x_static_test,
-                models=result.models,
-                era5_dict=data.era5_test,
-                scaler_y=data.scaler_y,
-                feature_names=data.feature_names,
-                cluster_ids=data.cluster_ids,
-            )
-        else:
-            preds = trainer.predict(
-                x_dict=data.x_test,
-                models=result.models,
-                era5_dict=data.era5_test,
-                scaler_y=data.scaler_y,
-                feature_names=data.feature_names,
-                cluster_ids=data.cluster_ids,
-            )
-
+        `preds` já vem calculado pelo chamador — antes esta função chamava
+        `trainer.predict(...)` internamente (por isso recebia `trainer`, só
+        pra decidir a assinatura via `isinstance(trainer, ClusterTRTrainer)`),
+        uma de três chamadas redundantes com os mesmos argumentos dentro do
+        mesmo `cluster_lstm.run()` (bug real corrigido, ver T2.2 do plano —
+        a predição agora é calculada uma única vez, em `_predict_lstm_experts`,
+        e reusada aqui/no resumo final/na exportação de CSV)."""
         # Diagnóstico de cobertura
         trained_keys = {
             (cid, s)

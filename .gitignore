@@ -43,3 +43,17 @@ research/TRWindBC/
 # OS
 .DS_Store
 Thumbs.db
+
+# Kedro
+src/kedro/
+.viz/
+.viz
+viz/
+
+#Notebooks
+notebooks
+notebooks/
+*.ipynb
+
+# Claude
+.claude/
