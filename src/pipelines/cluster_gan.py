@@ -16,9 +16,9 @@ from src.data.netcdf_loader import NetCDFLoader
 from src.data.cluster_assigner import assign_station_clusters
 from src.data.climatology import get_climatology
 from src.pipelines.common import (
-    BASE_FEATURES, TARGET_VAR, ERA5_GUST_PROXY, TRAIN_SLICE,
+    BASE_FEATURES, NEW_FEATURE_PREFIX, TARGET_VAR, ERA5_GUST_PROXY, TRAIN_SLICE,
     build_flat_dataframe, make_split, month_to_season,
-    parse_cluster_merge, apply_cluster_merge,
+    parse_cluster_merge, apply_cluster_merge, select_complete_rows,
 )
 from src.pipeline.augmentation.tabular_gan_augmenter import TabularExtremeGANAugmenter
 from src.utils.artifact_manager import ArtifactManager
@@ -79,6 +79,7 @@ def fit_gan(
 
     print("[cluster_gan] Construindo DataFrame de features...")
     df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
+    df = select_complete_rows(df, BASE_FEATURES, label="cluster_gan")
 
     merge_groups = parse_cluster_merge(cluster_merge)
     if merge_groups:
@@ -141,7 +142,10 @@ def generate_and_save(
         if cluster_synth.empty:
             continue
         y_real = df_tr[TARGET_VAR].to_numpy(float)
-        x_real = df_tr.reindex(columns=BASE_FEATURES)
+        # Features novas (`nf_*`) vão junto: só existem nos clusters cobertos,
+        # e linhas sintéticas sem elas são descartadas pelos braços que as usam.
+        nf_cols = sorted(c for c in df_tr.columns if c.startswith(NEW_FEATURE_PREFIX))
+        x_real = df_tr.reindex(columns=BASE_FEATURES + nf_cols)
         y_synth = cluster_synth["y_synth"].to_numpy(float)
 
         x_assigned = _nearest_neighbor_assign(y_real, x_real, y_synth)

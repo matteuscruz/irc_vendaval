@@ -28,8 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.inference.grid_direct_predict import predict_cluster  # noqa: E402
+from src.data.new_features import load_new_features_grid  # noqa: E402
 from src.inference.grid_features import (  # noqa: E402
-    assign_cell_clusters, load_grid_features, stack_basin_cells,
+    assign_cell_clusters, load_grid_features, new_features_for_cells, stack_basin_cells,
 )
 
 
@@ -62,11 +63,12 @@ def main() -> None:
     cid_arr = clusters.to_numpy()
 
     out = np.full((n_times, n_cells), np.nan, dtype="float32")
+    nf_grid = load_new_features_grid(args.raw_dir)
 
     for cid in sorted(pd.unique(cid_arr)):
         sel = np.where(cid_arr == cid)[0]
         print(f"\n[grid_direct] Cluster {cid}: {len(sel)} células", flush=True)
-        sub = cells.isel(cell=sel)
+        sub = new_features_for_cells(cells.isel(cell=sel), nf_grid)
 
         feats = [v for v in sub.data_vars
                  if set(sub[v].dims) <= {"time", "cell"}]
@@ -76,9 +78,6 @@ def main() -> None:
         df["cluster_id"] = cid
         from src.pipelines.common import month_to_season
         df["season"] = month_to_season(df["time"].dt.month)
-        from src.inference.grid_features import STATION_ONLY_FEATURES
-        for col in STATION_ONLY_FEATURES:
-            df[col] = np.nan
 
         preds = predict_cluster(df, int(cid), winners, args.artifacts_root,
                                 len(sel), n_times)
@@ -101,8 +100,6 @@ def main() -> None:
             "metodo": "modelo vencedor por cluster × trimestre aplicado às "
                       "features ERA5-Basin da própria célula",
             "dominio": "2129 células = união dos 14 clusters = máscara da bacia",
-            "features_imputadas": "lag1/2/3_gust_obs, rolling7d_gust_obs, "
-                                  "gust_P50 (todas) + era5_clim_wind (só lazy)",
             "winners_csv": str(args.winners),
         },
     )

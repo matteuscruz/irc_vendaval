@@ -22,10 +22,10 @@ METRIC_DIRECTIONS = {
 ABLATION_MATRIX = [
     {"name": "original", "feature_groups": "original", "use_synthetic": False},
     {"name": "synthetic", "feature_groups": "original", "use_synthetic": True},
-    {"name": "newfeatures", "feature_groups": "original,era5_18z,bt55", "use_synthetic": False},
-    {"name": "all", "feature_groups": "original,era5_18z,bt55", "use_synthetic": True},
+    {"name": "newfeatures", "feature_groups": "original,new_features", "use_synthetic": False},
+    {"name": "all", "feature_groups": "original,new_features", "use_synthetic": True},
     {"name": "basin", "feature_groups": "original,era5_basin", "use_synthetic": False},
-    {"name": "all_basin", "feature_groups": "original,era5_18z,bt55,era5_basin", "use_synthetic": True},
+    {"name": "all_basin", "feature_groups": "original,new_features,era5_basin", "use_synthetic": True},
 ]
 
 

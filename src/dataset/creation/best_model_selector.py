@@ -37,11 +37,21 @@ METRIC_DIRECTIONS = {
 ARM_FEATURE_GROUPS = {
     "original": "original",
     "synthetic": "original",
-    "newfeatures": "original,era5_18z,bt55",
-    "all": "original,era5_18z,bt55",
+    "newfeatures": "original,new_features",
+    "all": "original,new_features",
     "basin": "original,era5_basin",
-    "all_basin": "original,era5_18z,bt55,era5_basin",
+    "all_basin": "original,new_features,era5_basin",
 }
+
+# Conjunto de avaliação COMUM: cada pipeline reporta o próprio teste (lazy/mlp
+# o ano inteiro de 2020-2024; a LSTM v2 só Jan/Abr/Jul/Out, de todos os anos),
+# então comparar os results.csv nativos compara recortes diferentes. As
+# métricas são recalculadas das predictions_by_station.csv, no recorte que
+# todas cobrem como teste, e restritas às datas presentes em todos os combos.
+COMMON_SPLIT = "common_test"
+COMMON_MONTHS = (1, 4, 7, 10)
+COMMON_YEARS = (2020, 2024)
+EVAL_SETS = ("common", "native")
 
 # pipeline -> raiz local dos artefatos, relativa a --artifacts-root.
 PIPELINE_ROOTS = {
@@ -74,10 +84,9 @@ class Combo:
         """(cluster_id, season) com modelo salvo — season=None é o modelo
         pooled (ano inteiro; sempre o caso pra mlp/lstm, que não gravam
         arquivo por trimestre). Parseia só o nome do arquivo (sem
-        joblib.load) por velocidade — roda a cada winner table. `newfeatures`
-        e `all`(lstm) só têm modelo pra 5-6 clusters, por causa do
-        `--restrict-coverage` (estações fora da cobertura era5_18z/bt55 são
-        descartadas antes do treino)."""
+        joblib.load) por velocidade — roda a cada winner table. Braços com
+        `new_features` só têm modelo pros clusters 100% cobertos pelas
+        features novas (os demais são descartados antes do treino)."""
         if not self.models_dir.exists():
             return set()
         stems = [p.stem for p in self.models_dir.glob("best_model_c*.joblib")]
@@ -206,11 +215,71 @@ def derive_quarterly_from_predictions(combo: Combo, results: pd.DataFrame) -> pd
     return pd.DataFrame(rows)
 
 
-def load_all_results_with_derived(combos: list[Combo]) -> pd.DataFrame:
+def derive_common_eval_metrics(
+    combos: list[Combo], months=COMMON_MONTHS, years=COMMON_YEARS,
+) -> pd.DataFrame:
+    """Métricas de todos os combos no MESMO recorte: linhas de teste
+    (`split == "test"`) nos `months` e nos anos `years` (inclusivo), e — por
+    cluster — só as datas presentes em TODOS os combos que têm aquele cluster
+    (absorve a purga de janelas da LSTM sem cortar estações). Uma linha por
+    (pipeline, arm, cluster, season) + season='ALL', com split='common_test'."""
+    frames: dict[tuple[str, str], pd.DataFrame] = {}
+    for c in combos:
+        p = load_station_predictions(c)
+        if p.empty or not {"time", "split", "y_true", "y_pred"} <= set(p.columns):
+            print(
+                f"[best_model_selector] AVISO: {c.pipeline}/{c.arm} sem "
+                "predictions_by_station.csv utilizável — fora do conjunto comum "
+                "(compete com as métricas nativas)."
+            )
+            continue
+        t = p["time"]
+        keep = (p["split"] == "test") & t.dt.month.isin(months) & t.dt.year.between(*years)
+        p = p.loc[keep, ["cluster_id", "time", "y_true", "y_pred"]].dropna(subset=["y_true", "y_pred"])
+        if p.empty:
+            continue
+        p["date"] = p["time"].dt.normalize()
+        frames[(c.pipeline, c.arm)] = p
+    if not frames:
+        return pd.DataFrame()
+
+    common_dates: dict[int, set] = {}
+    for p in frames.values():
+        for cid, g in p.groupby("cluster_id"):
+            dates = set(g["date"].unique())
+            common_dates[cid] = dates if cid not in common_dates else common_dates[cid] & dates
+
+    rows = []
+    for (pipeline, arm), p in frames.items():
+        for cid, g in p.groupby("cluster_id"):
+            g = g[g["date"].isin(list(common_dates[cid]))]
+            if len(g) < 2:
+                continue
+            seasons = month_to_season(g["time"].dt.month)
+            for season, gs in [("ALL", g), *g.groupby(seasons)]:
+                if len(gs) < 2:
+                    continue
+                metrics = compute_metrics(gs["y_true"].to_numpy(float), gs["y_pred"].to_numpy(float))
+                rows.append({
+                    "pipeline": pipeline, "arm": arm, "experiment": arm,
+                    "cluster_id": int(cid), "season": season, "split": COMMON_SPLIT,
+                    "n_samples": len(gs), **metrics,
+                })
+    return pd.DataFrame(rows)
+
+
+def load_all_results_with_derived(
+    combos: list[Combo], eval_set: str = "common",
+) -> pd.DataFrame:
     """`load_results` + `derive_quarterly_from_predictions` pros combos que
-    precisarem — ponto de entrada único usado pelo CLI e pelo grid_generator."""
+    precisarem (+ `derive_common_eval_metrics` com eval_set="common") — ponto
+    de entrada único usado pelo CLI e pelo grid_generator."""
+    if eval_set not in EVAL_SETS:
+        raise ValueError(f"eval_set={eval_set!r} (válidos: {EVAL_SETS})")
     results = load_results(combos)
     derived = [derive_quarterly_from_predictions(c, results) for c in combos]
+    if eval_set == "common":
+        derived.append(derive_common_eval_metrics(combos))
     derived = [d for d in derived if not d.empty]
     if derived:
         results = pd.concat([results] + derived, ignore_index=True)
@@ -218,13 +287,16 @@ def load_all_results_with_derived(combos: list[Combo]) -> pd.DataFrame:
 
 
 def _select_split(df: pd.DataFrame) -> pd.DataFrame:
-    """Por (pipeline, arm), prefere split='test'; senão usa o único disponível."""
+    """Por (pipeline, arm), prefere split='common_test' (conjunto comum),
+    depois 'test'; senão usa o único disponível."""
     if df.empty:
         return df
     frames = []
     for _, g in df.groupby(["pipeline", "arm"]):
         splits = set(g["split"].unique())
-        chosen = "test" if "test" in splits else sorted(splits)[0]
+        chosen = next(
+            (s for s in (COMMON_SPLIT, "test") if s in splits), sorted(splits)[0]
+        )
         frames.append(g[g["split"] == chosen])
     return pd.concat(frames, ignore_index=True) if frames else df.iloc[0:0]
 
@@ -329,6 +401,7 @@ def select_winner_table(
                 "pipeline": best["pipeline"], "arm": best["arm"],
                 "metric": metric, "metric_value": float(best[metric]),
                 "n_samples": int(best["n_samples"]),
+                "eval_set": "common" if best["split"] == COMMON_SPLIT else "native",
             })
     return pd.DataFrame(rows)
 
@@ -337,7 +410,7 @@ def apply_fitted_model_fallback(
     table: pd.DataFrame, combos: list[Combo], results: pd.DataFrame, metric: str,
 ) -> pd.DataFrame:
     """Quando o vencedor não tem modelo salvo pro cluster (gap do
-    `--restrict-coverage` em `newfeatures`/`all`-lstm), desce pro próximo
+    cobertura das features novas em `newfeatures`/`all`), desce pro próximo
     candidato do ranking até achar um com `fitted_models`. Registra a troca
     em `fallback_from` (None se o vencedor original já tinha modelo)."""
     if table.empty:
@@ -397,12 +470,15 @@ def apply_fitted_model_fallback(
 
 def build_winner_table(
     artifacts_root: str | Path = "artifacts", metric: str = "R2",
+    eval_set: str = "common",
 ) -> tuple[pd.DataFrame, list[Combo]]:
     """Ponto de entrada único: descobre combos, carrega resultados (+
     derivados), monta a tabela de vencedores por (cluster, trimestre) com
-    fallback pra modelo salvo. Usado pelo CLI e pelo grid_generator."""
+    fallback pra modelo salvo. Usado pelo CLI e pelo grid_generator.
+    `eval_set="common"` (default) compara todos no conjunto comum
+    (`derive_common_eval_metrics`); "native" usa o teste de cada pipeline."""
     combos = discover_combos(artifacts_root)
-    results = load_all_results_with_derived(combos)
+    results = load_all_results_with_derived(combos, eval_set=eval_set)
     table = select_winner_table(results, metric=metric)
     table = apply_fitted_model_fallback(table, combos, results, metric)
     return table, combos
@@ -416,9 +492,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--artifacts-root", default="artifacts")
     parser.add_argument("--metric", default="R2", choices=METRICS)
+    parser.add_argument("--eval-set", default="common", choices=EVAL_SETS)
     args = parser.parse_args()
 
-    winner_table, found_combos = build_winner_table(args.artifacts_root, args.metric)
+    winner_table, found_combos = build_winner_table(
+        args.artifacts_root, args.metric, eval_set=args.eval_set,
+    )
     print(f"[best_model_selector] {len(found_combos)} combinação(ões) descoberta(s).")
     with pd.option_context("display.max_rows", None, "display.width", 160):
         print(winner_table.to_string(index=False))

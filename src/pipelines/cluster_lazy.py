@@ -16,16 +16,16 @@ _FAST_REGRESSORS = [c for n, c in REGRESSORS if n not in _SLOW_MODELS]
 
 from src.data.netcdf_loader import NetCDFLoader
 from src.data.cluster_assigner import assign_station_clusters
-from src.data.climatology import get_climatology
+from src.data.climatology import get_harmonic_climatology
 from sklearn.metrics import r2_score as _r2_score
 
 from src.pipelines.common import (
-    BASE_FEATURES, TARGET_VAR, RANDOM_STATE,
-    TRAIN_SLICE, VAL_SLICE, TEST_SLICE,
-    build_flat_dataframe, make_split,
+    BASE_FEATURES, ERA5_GUST_PROXY, TARGET_VAR, RANDOM_STATE,
+    build_flat_dataframe, assign_split_labels, default_month_block_split,
+    split_part, split_spec_from_labels,
     parse_cluster_merge, apply_cluster_merge,
-    preprocess_df, month_to_season, resolve_feature_groups,
-    compute_metrics, restrict_to_feature_coverage,
+    preprocess_df, month_to_season, resolve_feature_groups, uses_new_features,
+    compute_metrics, select_complete_rows, drop_incomplete_synthetic,
 )
 from src.pipelines.metrics_schema import (
     CORE_RESULTS_COLUMNS, build_results_row, build_predictions_frame,
@@ -60,8 +60,9 @@ def _compute_cluster_neighbors(df: pd.DataFrame, n_neighbors: int) -> dict:
 
 def _write_experiment_meta(
     manager, cluster_merge, merge_groups, cluster_summary, results_df, unified_results_df,
-    synthetic_csv=None, feature_groups: str = "original,era5_18z,bt55",
+    synthetic_csv=None, feature_groups: str = "original",
     active_features: list[str] | None = None, ablation_group: str | None = None,
+    split_spec: dict | None = None,
 ):
     best = results_df.loc[results_df.groupby("cluster_id")["R-Squared"].idxmax()]
     best_cols = [c for c in ["cluster_id", "n_stations", "Model", "R-Squared", "RMSE"] if c in best.columns]
@@ -75,8 +76,8 @@ def _write_experiment_meta(
         "feature_groups": feature_groups,
         "active_features": active_features,
         "ablation_group": ablation_group,
-        "train_slice": list(TRAIN_SLICE),
-        "val_slice": list(VAL_SLICE),
+        "split": split_spec,
+        "climatology": {"method": "harmonic", "n_harmonics": 3},
         "clusters": {
             str(cid): {"n_stations": int(row["n_stations"]), "n_samples": int(row["n_samples"])}
             for cid, row in cluster_summary.iterrows()
@@ -392,18 +393,18 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
                          synth_n_above=None, synth_n_below=0,
                          extreme_percentile=0.90, season=None,
                          neighbor_data=None, eval_window="monthly",
-                         active_features=None,
+                         active_features=None, split_spec=None,
                          validation_mode="temporal", spatial_n_folds=5, spatial_seed=42):
     label = f"Cluster {cid}" + (f" / {season}" if season else "")
     n_stations = group["estacao"].nunique()
-    df_tr = make_split(group, TRAIN_SLICE)
-    df_vl = make_split(group, VAL_SLICE)
-    df_te = make_split(group, TEST_SLICE)
+    df_tr = split_part(group, "train")
+    df_vl = split_part(group, "val")
+    df_te = split_part(group, "test")
 
     # Incorpora dados reais de clusters vizinhos ao treino (validação/teste
     # permanecem apenas no cluster alvo para medir performance sem contaminação)
     if neighbor_data is not None and not neighbor_data.empty:
-        df_tr_neigh = make_split(neighbor_data, TRAIN_SLICE)
+        df_tr_neigh = split_part(neighbor_data, "train")
         if not df_tr_neigh.empty:
             n_neigh = len(df_tr_neigh)
             df_tr = pd.concat([df_tr, df_tr_neigh], ignore_index=True)
@@ -421,26 +422,14 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
         print(f"   {label}: sem dados suficientes — pulando.")
         return
 
-    # Teste (2024) nunca influencia a seleção do modelo (só val faz isso) —
-    # é só calculado depois, com o vencedor já escolhido. Falta de teste num
+    # O teste nunca influencia a seleção do modelo (só val faz isso) — é só
+    # calculado depois, com o vencedor já escolhido. Falta de teste num
     # cluster/season específico não pula o cluster, só desliga esse bloco.
     has_test = not df_te.empty
     if not has_test:
-        print(f"   {label}: sem dados de teste (2024) — val segue valendo pra seleção, teste omitido.")
+        print(f"   {label}: sem dados de teste — val segue valendo pra seleção, teste omitido.")
 
-    # Climatologia por estação
-    gust_p50_station = df_tr.groupby("estacao")[TARGET_VAR].median()
-    gust_p50_cluster = float(df_tr[TARGET_VAR].median())
-    df_tr = df_tr.copy()
-    df_vl = df_vl.copy()
-    df_tr["gust_P50"] = df_tr["estacao"].map(gust_p50_station)
-    df_vl["gust_P50"] = df_vl["estacao"].map(gust_p50_station).fillna(gust_p50_cluster)
-    if has_test:
-        df_te = df_te.copy()
-        df_te["gust_P50"] = df_te["estacao"].map(gust_p50_station).fillna(gust_p50_cluster)
-
-    _features = active_features if active_features is not None else BASE_FEATURES
-    train_features = [f for f in _features + ["gust_P50"] if f in df_tr.columns and df_tr[f].notna().any()]
+    train_features = list(active_features if active_features is not None else BASE_FEATURES)
 
     x_train = df_tr[train_features].reset_index(drop=True)
     y_train = df_tr[TARGET_VAR].reset_index(drop=True)
@@ -471,13 +460,13 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
         s_raw = synth_df[synth_df["cluster_id"].astype(str).isin(all_cids)]
         if season is not None and "season" in s_raw.columns:
             s_raw = s_raw[s_raw["season"] == season]
+        if len(s_raw):
+            s_raw = drop_incomplete_synthetic(s_raw, train_features)
         s = _filter_synth(s_raw if len(s_raw) else None, y_real_train,
                           synth_n_above, synth_n_below, extreme_percentile)
         if s is not None and len(s):
             has_synth = True
             y_synth_train = s[TARGET_VAR].to_numpy(float)
-            s = s.copy()
-            s["gust_P50"] = gust_p50_cluster
             x_synth = s.reindex(columns=train_features).reset_index(drop=True)
             x_train = pd.concat([x_train, x_synth], ignore_index=True)
             y_train = pd.concat(
@@ -683,19 +672,9 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
         holdout_chunks = []
         for fold in iter_holdout_folds(
             group, mode=validation_mode, n_folds=spatial_n_folds, seed=spatial_seed,
-            clim_value_col=TARGET_VAR,
         ):
-            # gust_P50: mesma lógica de fallback já usada no split temporal —
-            # média por estação no treino do fold, cluster-mean se a estação
-            # held-out não aparecer no treino (sempre o caso aqui). Calculado
-            # ANTES de `fold_features` — senão a coluna ainda não existiria em
-            # `fold.df_train` e ficaria de fora do conjunto de features do fold.
-            gp50_fold = fold.df_train.groupby("estacao")[TARGET_VAR].median()
-            gp50_fold_cluster = float(fold.df_train[TARGET_VAR].median())
-            df_tr_f = fold.df_train.copy()
-            df_ev_f = fold.df_eval.copy()
-            df_tr_f["gust_P50"] = df_tr_f["estacao"].map(gp50_fold)
-            df_ev_f["gust_P50"] = df_ev_f["estacao"].map(gp50_fold).fillna(gp50_fold_cluster)
+            df_tr_f = fold.df_train
+            df_ev_f = fold.df_eval
 
             # Reindexa para o schema COMPLETO de `train_features` (não um
             # subconjunto filtrado por fold) — o estimador campeão clonado
@@ -703,9 +682,6 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
             # ColumnTransformer que espera exatamente os nomes de coluna
             # vistos no fit original (temporal); um subconjunto diferente
             # levanta "A given column is not a column of the dataframe".
-            # Colunas ausentes/100%-NaN neste fold (ex.: features ERA5-18UTC/
-            # BT55 fora da cobertura do Paraná) viram NaN e são preenchidas
-            # pelo imputer em `preprocess_df` (keep_empty_features=True).
             x_tr_f = df_tr_f.reindex(columns=train_features).reset_index(drop=True)
             y_tr_f = df_tr_f[TARGET_VAR].reset_index(drop=True)
             x_ev_f = df_ev_f.reindex(columns=train_features).reset_index(drop=True)
@@ -779,28 +755,30 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     )
 
     # ── Serializar o melhor modelo para inferência espacial ────────────────
-    # Salva: modelo fitado + imputer + scaler + lista de features. Persiste
+    # Salva: modelo fitado + scaler + lista de features. Persiste
     # tanto o modelo pooled (season=None) quanto os campeões por trimestre —
     # antes só o pooled era salvo, então o vencedor "por trimestre" da tabela
     # de ablation nunca chegava a ser usado na inferência espacial.
     if fitted and best_model in fitted:
         import joblib
-        from sklearn.impute import SimpleImputer
         from sklearn.preprocessing import RobustScaler
 
-        # Reconstruir imputer/scaler (mesma lógica de preprocess_df)
+        # Reconstruir scaler (mesma lógica de preprocess_df)
         # x_train_orig contém os dados REAIS pré-preprocess (sem sintéticos, sem scaling)
-        _imputer = SimpleImputer(strategy="mean").fit(x_train_orig)
-        _scaler = RobustScaler().fit(_imputer.transform(x_train_orig))
+        _scaler = RobustScaler().fit(x_train_orig)
 
         artifact = {
             "model": fitted[best_model],
             "model_name": best_model,
-            "imputer": _imputer,
             "scaler": _scaler,
             "features": list(train_features),
             "cluster_id": cid,
             "season": season,
+            # A inferência em grade precisa reproduzir EXATAMENTE a mesma
+            # climatologia: harmônica ajustada nos dias de treino desta
+            # partição (ver src/inference/grid_direct_predict.py).
+            "split": split_spec,
+            "climatology": {"method": "harmonic", "n_harmonics": 3},
             "r2": float(scores.loc[scores["Model"] == best_model, "R-Squared"].iloc[0]),
             # LazyPredict prevê o valor absoluto (m/s), não uma razão sobre
             # o ERA5 — usado por SpatialCorrector pra decidir a reconstrução
@@ -820,11 +798,39 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     print(f"[lazy_clusters] {label} concluído e salvo.")
 
 
+def _recover_from_artifacts(manager) -> tuple[dict | None, list[str] | None]:
+    """Partição e features EFETIVAMENTE usadas, lidas de um artefato treinado.
+
+    A agregação roda num processo separado (`--aggregate-only`, é assim que o
+    Modal orquestra), que não carrega os dados e portanto não conhece nem a
+    partição nem as features resolvidas em runtime. Sem isso o `run_meta.json`
+    registrava `split: null` e `active_features: null` — justamente os campos
+    que dizem o que a execução fez. O artefato do modelo é a fonte certa:
+    é o que de fato treinou.
+    """
+    import joblib
+
+    for path in sorted(manager.get_model_dir().glob("best_model_c*.joblib")):
+        try:
+            art = joblib.load(path)
+        except Exception as exc:
+            print(f"[lazy_clusters] AVISO: {path.name} ilegível ({exc}) — tentando o próximo.")
+            continue
+        return art.get("split"), list(art.get("features", [])) or None
+    print("[lazy_clusters] AVISO: nenhum artefato legível — run_meta sem split/active_features.")
+    return None, None
+
+
 def _build_aggregate(
     manager, cluster_merge, synthetic_csv, plt, sns,
-    feature_groups: str = "original,era5_18z,bt55",
+    feature_groups: str = "original",
     active_features: list[str] | None = None, ablation_group: str | None = None,
+    split_spec: dict | None = None,
 ):
+    if split_spec is None or active_features is None:
+        recovered_split, recovered_features = _recover_from_artifacts(manager)
+        split_spec = split_spec or recovered_split
+        active_features = active_features or recovered_features
     partial_dir = manager.get_partial_dir("clusters")
     partials = sorted(partial_dir.glob("cluster_*.csv"))
     if not partials:
@@ -920,18 +926,17 @@ def _build_aggregate(
         unified_results_df=unified_results_df,
         synthetic_csv=synthetic_csv,
         feature_groups=feature_groups, active_features=active_features,
-        ablation_group=ablation_group,
+        ablation_group=ablation_group, split_spec=split_spec,
     )
 
 
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 def load_lazy_training_frame(
-    raw_dir: str, shp_dir: str, feature_groups: str,
-    restrict_coverage: bool = False, cluster_merge=None,
+    raw_dir: str, shp_dir: str, feature_groups: str, cluster_merge=None,
 ) -> pd.DataFrame:
-    """NetCDF → clusters → climatologia → dataframe de features → cobertura
-    → merge de clusters. Extraído de `run()` sem mudança de lógica."""
+    """NetCDF → clusters → climatologia → dataframe de features → linhas
+    completas (clusters cobertos, sem NaN) → merge de clusters."""
     print("[lazy_clusters] Carregando NetCDF...")
     ds_inmet, ds_era5 = NetCDFLoader(raw_dir).load_extended()
     print(f"  Estações: {len(ds_inmet.estacao.values)} | ERA5 features: {list(ds_era5.data_vars)}")
@@ -940,14 +945,28 @@ def load_lazy_training_frame(
     station_clusters = assign_station_clusters(ds_inmet, shp_dir)
     print(station_clusters.to_string(index=False))
 
-    print("[lazy_clusters] Calculando climatologia...")
-    ds_clim = get_climatology(ds_inmet, TARGET_VAR, slice(*TRAIN_SLICE))
+    # Split por blocos de mês resolvido ANTES da climatologia: ela é ajustada
+    # só nos dias de treino, então precisa da mesma partição que o treino usa.
+    times = pd.DatetimeIndex(ds_era5["time"].values)
+    split = default_month_block_split(times.values)
+    labels = split.label(times)
+    print(
+        f"[lazy_clusters] Split por blocos de mês: teste={list(split.test_months)}, "
+        f"{len(split.val_units)} blocos (ano, mês) de validação."
+    )
+
+    print("[lazy_clusters] Climatologia ERA5 harmônica (dias de treino)...")
+    ds_clim = get_harmonic_climatology(
+        ds_era5, ERA5_GUST_PROXY, times[labels == "train"],
+    ).reset_coords(drop=True)
 
     print("[lazy_clusters] Construindo DataFrame de features...")
     df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
     print(f"  Shape total: {df.shape}")
-    if restrict_coverage:
-        df = restrict_to_feature_coverage(df, feature_groups)
+    df, _ = assign_split_labels(df, split)
+    df = select_complete_rows(
+        df, resolve_feature_groups(feature_groups, df.columns), label="lazy_clusters",
+    )
 
     merge_groups = parse_cluster_merge(cluster_merge)
     if merge_groups:
@@ -962,7 +981,7 @@ def run_cluster_season_loop(
     df: pd.DataFrame, synth_df, manager, plt, *,
     cluster_id=None, stratify_seasons: bool = True, n_neighbor_clusters: int = 1,
     synth_n_above=None, synth_n_below: int = 0, extreme_percentile: float = 0.90,
-    eval_window: str = "monthly", active_features=None,
+    eval_window: str = "monthly", active_features=None, split_spec=None,
     validation_mode: str = "temporal", spatial_n_folds: int = 5, spatial_seed: int = 42,
 ) -> None:
     """Loop cluster × trimestre chamando `_process_one_cluster` (já
@@ -1013,6 +1032,7 @@ def run_cluster_season_loop(
             neighbor_data=neighbor_data,
             eval_window=eval_window,
             active_features=active_features,
+            split_spec=split_spec,
             validation_mode=validation_mode,
             spatial_n_folds=spatial_n_folds,
             spatial_seed=spatial_seed,
@@ -1035,8 +1055,7 @@ def run(
     cluster_id=None,
     aggregate_only: bool = False,
     list_clusters: bool = False,
-    feature_groups: str = "original,era5_18z,bt55",
-    restrict_coverage: bool = False,
+    feature_groups: str = "original",
     ablation_group: str | None = None,
     validation_mode: str = "temporal",
     spatial_n_folds: int = 5,
@@ -1051,10 +1070,10 @@ def run(
     manager = ArtifactManager(output_dir, exp_name)
     print(f"[lazy_clusters] Experimento: {manager.root}")
 
-    active_features = resolve_feature_groups(feature_groups)
-    print(f"[lazy_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
-
     if aggregate_only:
+        # Só relê os parciais — as features novas (`nf_*`) só são conhecidas
+        # depois de carregar os dados, então o meta registra o spec.
+        active_features = None if uses_new_features(feature_groups) else resolve_feature_groups(feature_groups)
         _build_aggregate(
             manager, cluster_merge, synthetic_csv, plt, sns,
             feature_groups=feature_groups, active_features=active_features,
@@ -1088,10 +1107,10 @@ def run(
         synth_df = pd.read_csv(synthetic_csv)
         print(f"[lazy_clusters] Augment: {len(synth_df)} linhas sintéticas de {synthetic_csv}")
 
-    df = load_lazy_training_frame(
-        raw_dir, shp_dir, feature_groups,
-        restrict_coverage=restrict_coverage, cluster_merge=cluster_merge,
-    )
+    df = load_lazy_training_frame(raw_dir, shp_dir, feature_groups, cluster_merge=cluster_merge)
+    active_features = resolve_feature_groups(feature_groups, df.columns)
+    split_spec = split_spec_from_labels(df)
+    print(f"[lazy_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
 
     run_cluster_season_loop(
         df, synth_df, manager, plt,
@@ -1099,7 +1118,8 @@ def run(
         n_neighbor_clusters=n_neighbor_clusters,
         synth_n_above=synth_n_above, synth_n_below=synth_n_below,
         extreme_percentile=extreme_percentile, eval_window=eval_window,
-        active_features=active_features, validation_mode=validation_mode,
+        active_features=active_features, split_spec=split_spec,
+        validation_mode=validation_mode,
         spatial_n_folds=spatial_n_folds, spatial_seed=spatial_seed,
     )
 
@@ -1107,7 +1127,7 @@ def run(
         _build_aggregate(
             manager, cluster_merge, synthetic_csv, plt, sns,
             feature_groups=feature_groups, active_features=active_features,
-            ablation_group=ablation_group,
+            ablation_group=ablation_group, split_spec=split_spec,
         )
 
     return None

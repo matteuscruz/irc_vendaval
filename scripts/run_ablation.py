@@ -2,7 +2,7 @@
 """Matriz de ablation: cluster_mlp em 4 combinações de dados/features.
 
 Roda cluster_mlp.run() isoladamente para cada combinação — original / +
-sintético / + features novas (ERA5-18UTC + BT55) / tudo junto — cada uma em
+sintético / + features novas (dataset/raw/new_features) / tudo junto — cada uma em
 seu próprio experimento (plots completos + results.csv + run_meta.json com
 "ablation_group" para filtro no dashboard), e agrega os 4 results.csv num
 comparativo lado a lado (estilo scripts/compare_pipelines.py, mas agrupando

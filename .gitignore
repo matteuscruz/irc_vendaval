@@ -34,6 +34,7 @@ dataset/*
 scrollytelling/
 research/GFS-NWP-Wind-Correction/
 research/TRWindBC/
+extreme_winds_doc_paper/
 
 # IDE
 .vscode/
@@ -57,3 +58,4 @@ notebooks/
 
 # Claude
 .claude/
+

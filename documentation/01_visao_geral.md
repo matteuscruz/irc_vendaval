@@ -14,7 +14,7 @@ boa parte das pipelines.
 
 ## Pipelines ativas
 
-- `cluster_lstm`: LSTM dual-head em Keras/TensorFlow.
+- `cluster_lstm`: LSTM de saída única em Keras/TensorFlow (diária ou horária, split por blocos de mês).
 - `cluster_mlp`: `MLPRegressor` do scikit-learn com foco em extremos.
 - `cluster_lazy`: benchmark com LazyPredict e seleção do melhor modelo por cluster.
 - `cluster_gan`: geração de amostras sintéticas para augmentation.

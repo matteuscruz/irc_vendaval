@@ -6,7 +6,9 @@ não co-localizada nas estações INMET, diferente do ERA5_Stratified.nc). Este
 loader:
   1. Abre o arquivo (lazy, backend netCDF4 — não precisa de dask, é um único
      arquivo, sem open_mfdataset)
-  2. Interpola nearest-neighbor para as coordenadas das estações INMET
+  2. Extrai o valor nas coordenadas das estações INMET — nearest-neighbor
+     (padrão, comportamento histórico) ou bilinear (`interp_method`, ver
+     src/data/interp.py)
   3. Renomeia variáveis com sufixo _basin (evita colisão com features ERA5 base)
   4. Retorna xr.Dataset com dims (time, estacao) — compatível com NetCDFLoader
 """
@@ -17,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from src.data.interp import METHODS, build_point_indexer, extract_points
 from src.utils.heartbeat import Heartbeat
 
 
@@ -25,8 +28,11 @@ class ERA5BasinLoader:
 
     FILENAME = "ERA5_Features_Basin_2000_2026.nc"
 
-    def __init__(self, raw_dir: str) -> None:
+    def __init__(self, raw_dir: str, interp_method: str = "nearest") -> None:
+        if interp_method not in METHODS:
+            raise ValueError(f"interp_method inválido: {interp_method!r} ({' | '.join(METHODS)})")
         self.path = Path(raw_dir) / self.FILENAME
+        self.interp_method = interp_method
 
     @staticmethod
     def _interp_to_stations(
@@ -98,12 +104,29 @@ class ERA5BasinLoader:
         print(f"[ERA5-Basin] Arquivo aberto em {_time.time() - _t_open:.0f}s "
               f"(lazy — só metadados, ainda não leu dado do disco).")
 
-        print(f"[ERA5-Basin] Montando indexadores nearest-neighbor pra "
+        print(f"[ERA5-Basin] Montando indexadores {self.interp_method} pra "
               f"{len(station_ids)} estações...")
         _t_sel = _time.time()
-        ds_sta = self._interp_to_stations(ds, lats, lons, station_ids)
-        print(f"[ERA5-Basin] .sel(nearest) montado em {_time.time() - _t_sel:.0f}s "
-              f"(ainda lazy — o .sel() em si não força leitura de disco).")
+        if self.interp_method == "nearest":
+            ds_sta = self._interp_to_stations(ds, lats, lons, station_ids)
+
+            def read_batch(start: int, end: int) -> xr.Dataset:
+                return ds_sta.isel(estacao=slice(start, end)).load()
+        else:
+            # Bilinear lê os 4 nós de cada estação e combina já em memória —
+            # por lote, porque em Dataset lazy sem dask a aritmética força a
+            # leitura (fazer de uma vez leria as 271 estações × 4 nós juntas).
+            indexer = build_point_indexer(
+                ds.latitude.values, ds.longitude.values, lats, lons, "bilinear",
+            )
+
+            def read_batch(start: int, end: int) -> xr.Dataset:
+                sl = slice(start, end)
+                return extract_points(
+                    ds, indexer.subset(sl), "estacao", station_ids[sl],
+                ).load()
+        print(f"[ERA5-Basin] indexadores montados em {_time.time() - _t_sel:.0f}s "
+              f"(ainda lazy — montar os índices não força leitura de disco).")
 
         # Ponto crítico: .sel(nearest) num Dataset lazy só MONTA os índices,
         # não lê nada do arquivo ainda — a leitura de verdade (potencialmente
@@ -121,14 +144,20 @@ class ERA5BasinLoader:
         # meio, a próxima tentativa pula os lotes já lidos em vez de reler
         # tudo do zero. Ainda corre o mesmo risco de overhead por chamada,
         # só que numa escala bem menor.
-        batch_dir = self.path.parent / "_era5_basin_batches"
+        # Cache por método: os lotes nearest não servem de cache pro bilinear
+        # (mesmas estações, valores diferentes) — sem o sufixo, uma run
+        # bilinear reaproveitaria silenciosamente os lotes nearest.
+        batch_dir = self.path.parent / (
+            "_era5_basin_batches" if self.interp_method == "nearest"
+            else f"_era5_basin_batches_{self.interp_method}"
+        )
         batch_dir.mkdir(exist_ok=True)
         batch_size = 40
         n_stations = len(station_ids)
         n_batches = (n_stations + batch_size - 1) // batch_size
         print(f"[ERA5-Basin] Lendo do disco em {n_batches} lote(s) de até "
-              f"{batch_size} estações ({len(ds_sta.data_vars)} variáveis × "
-              f"{ds_sta.sizes.get('time', '?')} timesteps cada), checkpoint "
+              f"{batch_size} estações ({len(ds.data_vars)} variáveis × "
+              f"{ds.sizes.get('time', '?')} timesteps cada), checkpoint "
               f"por lote em {batch_dir}...")
         _t_load = _time.time()
         batch_datasets = []
@@ -150,7 +179,7 @@ class ERA5BasinLoader:
 
             _t_batch = _time.time()
             with Heartbeat(f"lote {b + 1}/{n_batches}", interval=30):
-                ds_batch = ds_sta.isel(estacao=slice(start, end)).load()
+                ds_batch = read_batch(start, end)
             tmp_batch_path = batch_path.with_suffix(".nc.tmp")
             ds_batch.to_netcdf(tmp_batch_path)
             tmp_batch_path.rename(batch_path)

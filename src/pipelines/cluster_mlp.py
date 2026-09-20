@@ -10,14 +10,14 @@ from sklearn.neural_network import MLPRegressor
 
 from src.data.netcdf_loader import NetCDFLoader
 from src.data.cluster_assigner import assign_station_clusters
-from src.data.climatology import get_climatology
+from src.data.climatology import get_harmonic_climatology
 from src.pipelines.common import (
     TARGET_VAR, ERA5_GUST_PROXY, BASE_FEATURES, RANDOM_STATE,
-    TRAIN_SLICE, VAL_SLICE, TEST_SLICE,
-    build_flat_dataframe, make_split,
+    build_flat_dataframe, assign_split_labels, default_month_block_split,
+    split_part, split_spec_from_labels,
     parse_cluster_merge, apply_cluster_merge,
     preprocess_df, compute_metrics, resolve_feature_groups,
-    restrict_to_feature_coverage,
+    select_complete_rows, drop_incomplete_synthetic,
 )
 from src.pipelines.metrics_schema import build_results_row, build_predictions_frame
 from src.pipeline.validation.station_holdout import iter_holdout_folds
@@ -39,9 +39,10 @@ def _write_experiment_meta(
     unified_results_df,
     synthetic_csv=None,
     max_iter: int = 500,
-    feature_groups: str = "original,era5_18z,bt55",
+    feature_groups: str = "original",
     active_features: list[str] | None = None,
     ablation_group: str | None = None,
+    split_spec: dict | None = None,
 ) -> None:
     index_cols = [
         c for c in [
@@ -62,9 +63,8 @@ def _write_experiment_meta(
         "feature_groups": feature_groups,
         "active_features": active_features,
         "ablation_group": ablation_group,
-        "train_slice": list(TRAIN_SLICE),
-        "val_slice": list(VAL_SLICE),
-        "test_slice": list(TEST_SLICE),
+        "split": split_spec,
+        "climatology": {"method": "harmonic", "n_harmonics": 3},
         "per_cluster": results_df[index_cols].to_dict("records"),
     }
     meta_path = manager.write_run_meta(meta)
@@ -117,11 +117,11 @@ def _plot_train_distribution(data: list[dict], manager, plt) -> None:
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 def load_mlp_training_frame(
-    raw_dir: str, shp_dir: str, feature_groups: str,
-    restrict_coverage: bool = False, cluster_merge=None,
+    raw_dir: str, shp_dir: str, feature_groups: str, cluster_merge=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """NetCDF → clusters → climatologia ERA5 → dataframe de features →
-    cobertura → merge de clusters, + metadados de estação (lat/lon/cluster).
+    """NetCDF → clusters → climatologia ERA5 → dataframe de features → linhas
+    completas (clusters cobertos, sem NaN) → merge de clusters, + metadados
+    de estação (lat/lon/cluster).
     Extraído de `run()` sem mudança de lógica. Retorna `(df, stations_meta)`
     — a escrita de `stations_metadata.csv` continua no chamador (que já tem
     o `ArtifactManager` construído); este split é deliberadamente raso —
@@ -136,14 +136,28 @@ def load_mlp_training_frame(
     station_clusters = assign_station_clusters(ds_inmet, shp_dir)
     print(station_clusters.to_string(index=False))
 
-    print("[mlp_clusters] Calculando climatologia ERA5...")
-    ds_clim = get_climatology(ds_era5, ERA5_GUST_PROXY, slice(*TRAIN_SLICE))
+    # Split por blocos de mês resolvido ANTES da climatologia: ela é ajustada
+    # só nos dias de treino, então precisa da mesma partição que o treino usa.
+    times = pd.DatetimeIndex(ds_era5["time"].values)
+    split = default_month_block_split(times.values)
+    labels = split.label(times)
+    print(
+        f"[mlp_clusters] Split por blocos de mês: teste={list(split.test_months)}, "
+        f"{len(split.val_units)} blocos (ano, mês) de validação."
+    )
+
+    print("[mlp_clusters] Climatologia ERA5 harmônica (dias de treino)...")
+    ds_clim = get_harmonic_climatology(
+        ds_era5, ERA5_GUST_PROXY, times[labels == "train"],
+    ).reset_coords(drop=True)
 
     print("[mlp_clusters] Construindo DataFrame de features...")
     df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
     print(f"  Shape total: {df.shape}")
-    if restrict_coverage:
-        df = restrict_to_feature_coverage(df, feature_groups)
+    df, _ = assign_split_labels(df, split)
+    df = select_complete_rows(
+        df, resolve_feature_groups(feature_groups, df.columns), label="mlp_clusters",
+    )
 
     merge_groups = parse_cluster_merge(cluster_merge)
     if merge_groups:
@@ -172,8 +186,7 @@ def run(
     cluster_merge = None,
     synthetic_csv = None,
     exp_name = None,
-    feature_groups: str = "original,era5_18z,bt55",
-    restrict_coverage: bool = False,
+    feature_groups: str = "original",
     ablation_group: str | None = None,
     validation_mode: str = "temporal",
     spatial_n_folds: int = 5,
@@ -193,13 +206,6 @@ def run(
     cluster_plots_dir = manager.get_plot_dir("clusters")
     print(f"[mlp_clusters] Experimento: {out}")
 
-    active_features = resolve_feature_groups(feature_groups)
-    if "wind_mag_max" not in active_features:
-        raise ValueError(
-            "feature_groups precisa incluir 'original' — 'wind_mag_max' é "
-            "usado incondicionalmente no plot de fator de correção ERA5."
-        )
-    print(f"[mlp_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
 
     synth_df = None
     if synthetic_csv:
@@ -214,9 +220,16 @@ def run(
         df, stations_meta = precomputed_frame
     else:
         df, stations_meta = load_mlp_training_frame(
-            raw_dir, shp_dir, feature_groups,
-            restrict_coverage=restrict_coverage, cluster_merge=cluster_merge,
+            raw_dir, shp_dir, feature_groups, cluster_merge=cluster_merge,
         )
+    active_features = resolve_feature_groups(feature_groups, df.columns)
+    split_spec = split_spec_from_labels(df)
+    if "wind_mag_max" not in active_features:
+        raise ValueError(
+            "feature_groups precisa incluir 'original' — 'wind_mag_max' é "
+            "usado incondicionalmente no plot de fator de correção ERA5."
+        )
+    print(f"[mlp_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
     stations_meta.to_csv(manager.get_partial_path("csv", "stations_metadata.csv"), index=False)
     print(f"  Estações: {len(stations_meta)}")
     # recomputa (barato, parser puro) — precisado só pro meta.json no final,
@@ -239,20 +252,15 @@ def run(
             n_stations = group["estacao"].nunique()
             print(f"── Cluster {cid} | {n_stations} estação(ões) ──")
 
-            df_tr = make_split(group, TRAIN_SLICE)
-            df_vl = make_split(group, VAL_SLICE)
-            df_te = make_split(group, TEST_SLICE)
+            df_tr = split_part(group, "train")
+            df_vl = split_part(group, "val")
+            df_te = split_part(group, "test")
 
             if df_tr.empty or df_vl.empty:
                 print(f"   Sem dados — pulando cluster {cid}.")
                 continue
 
-            # Filtra apenas features disponíveis no DataFrame (ERA5-18UTC/BT55 podem
-            # estar ausentes se load_extended falhou silenciosamente)
-            avail_features = [f for f in active_features if f in df_tr.columns and df_tr[f].notna().any()]
-            missing = [f for f in active_features if f not in df_tr.columns]
-            if missing:
-                print(f"   [AVISO] {len(missing)} features ausentes (p.ex. _18z/bt55): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+            avail_features = list(active_features)
 
             x_train = df_tr[avail_features].reset_index(drop=True)
             y_train_abs = df_tr[TARGET_VAR].reset_index(drop=True).values
@@ -269,6 +277,8 @@ def run(
 
             if synth_df is not None:
                 s = synth_df[synth_df["cluster_id"] == cid]
+                if len(s):
+                    s = drop_incomplete_synthetic(s, avail_features)
                 if len(s):
                     y_synth_train = s[TARGET_VAR].to_numpy(float)
                     x_train = pd.concat(
@@ -312,19 +322,21 @@ def run(
 
             # ── Serializar o modelo MLP para inferência espacial ────────────────
             import joblib
-            from sklearn.impute import SimpleImputer
             from sklearn.preprocessing import RobustScaler
             models_dir = out / "fitted_models"
             models_dir.mkdir(exist_ok=True)
-            _imputer = SimpleImputer(strategy="mean").fit(x_train)
-            _scaler = RobustScaler().fit(_imputer.transform(x_train))
+            _scaler = RobustScaler().fit(x_train)
             artifact = {
                 "model": mlp,
                 "model_name": "MLPRegressor",
-                "imputer": _imputer,
                 "scaler": _scaler,
                 "features": list(avail_features),
                 "cluster_id": cid,
+                # A inferência em grade precisa reproduzir EXATAMENTE a mesma
+                # climatologia: harmônica ajustada nos dias de treino desta
+                # partição (ver src/inference/grid_direct_predict.py).
+                "split": split_spec,
+                "climatology": {"method": "harmonic", "n_harmonics": 3},
                 # MLP prevê a razão sobre o ERA5 (ratio * wind_mag_max), não
                 # o valor absoluto — usado por SpatialCorrector pra decidir
                 # a reconstrução correta (dispatch explícito em vez de
@@ -434,10 +446,7 @@ def run(
                     group, mode=validation_mode,
                     n_folds=spatial_n_folds, seed=spatial_seed,
                 ):
-                    fold_avail = [
-                        f for f in avail_features
-                        if f in fold.df_train.columns and fold.df_train[f].notna().any()
-                    ]
+                    fold_avail = avail_features
                     x_tr_f = fold.df_train[fold_avail].reset_index(drop=True)
                     y_tr_f_abs = fold.df_train[TARGET_VAR].reset_index(drop=True).values
                     era5_tr_f = fold.df_train[ERA5_GUST_PROXY].reset_index(drop=True).values
@@ -733,7 +742,7 @@ def run(
     # PDF report
     fig_cover = plt.figure(figsize=(11.7, 8.3))
     fig_cover.text(0.5, 0.91, "IRC Vendaval — MLP Bias Correction Report", ha="center", fontsize=20, fontweight="bold")
-    fig_cover.text(0.5, 0.85, f"Treino: {TRAIN_SLICE[0]} → {TRAIN_SLICE[1]}   |   Validação: {VAL_SLICE[0]} → {VAL_SLICE[1]}", ha="center", fontsize=12, color="gray")
+    fig_cover.text(0.5, 0.85, "Split por blocos de mês  |  teste: Jan/Abr/Jul/Out de todos os anos", ha="center", fontsize=12, color="gray")
     tbl_cols = ["Cluster", "Estações", "R²", "RMSE", "Bias", "Bias@P90", "ERA5 Bias@P90"]
     tbl_data = results_df[["cluster_id", "n_stations", "MLP_R2", "MLP_RMSE", "MLP_Bias", "MLP_Bias_P90", "ERA5_Bias_P90"]].round(3).values.tolist()
     ax_tbl = fig_cover.add_axes([0.04, 0.08, 0.92, 0.68])
@@ -761,7 +770,7 @@ def run(
         unified_results_df=unified_results_df,
         synthetic_csv=synthetic_csv, max_iter=max_iter,
         feature_groups=feature_groups, active_features=active_features,
-        ablation_group=ablation_group,
+        ablation_group=ablation_group, split_spec=split_spec,
     )
 
     return results_df

@@ -245,7 +245,7 @@ class TestFallback:
             _base_result_row("lazy", "original", 1, "DJF", "test", R2=0.3),
         ])
         # lstm/newfeatures não tem modelo salvo pro cluster 1 (gap de
-        # --restrict-coverage); lazy/original tem.
+        # cobertura das features novas); lazy/original tem.
         _write_fitted_models(runnerup_dir, [1], suffix="joblib")
 
         combos = discover_combos(artifacts_root)

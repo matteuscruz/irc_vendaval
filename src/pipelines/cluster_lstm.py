@@ -1,6 +1,13 @@
-"""Pipeline LSTM dual-head por cluster (YAML-driven)."""
+"""Pipeline LSTM por cluster (YAML-driven, schema v2).
+
+Modelo: Input(T, F) → LSTM(96) → Dropout(0.3) → Dense(1), Huber + Adam, alvo =
+rajada máxima diária em m/s. Dados diários (`ClusterPreprocessor`) ou horários
+(`build_hourly_batch`) via `data.resolution`; split por blocos de mês (teste =
+Jan/Abr/Jul/Out de todos os anos) — ver src/pipeline/data/splits.py.
+"""
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -18,13 +25,12 @@ def _load_config(path: str) -> dict:
 
 def _print_final_summary(results_df, data, preds, aug_cfg=None):
     """Resumo enriquecido após avaliação: global, por season, extremos.
-    `preds` já vem calculado pelo chamador (`_predict_lstm_experts`) — antes
-    esta função recalculava a predição do zero com `trainer.predict(...)`,
-    uma de três chamadas redundantes com os mesmos argumentos no mesmo
-    `run()` (bug real corrigido, ver T2.2 do plano)."""
+    `preds` (m/s) já vem calculado pelo chamador (`_predict_lstm_experts`)."""
     import numpy as np
     import pandas as pd
     from sklearn.metrics import mean_squared_error
+
+    from src.pipeline.data.target import inverse_target
 
     print("\n" + "=" * 60)
     print("RESUMO FINAL")
@@ -40,9 +46,7 @@ def _print_final_summary(results_df, data, preds, aug_cfg=None):
 
     w = results_df["n_samples"]
     if w.sum() == 0:
-        print(
-            "\n[AVISO] Nenhuma amostra válida para métricas ponderadas."
-        )
+        print("\n[AVISO] Nenhuma amostra válida para métricas ponderadas.")
         print("=" * 60)
         return
 
@@ -58,17 +62,11 @@ def _print_final_summary(results_df, data, preds, aug_cfg=None):
     def _wagg(g):
         wts = g["n_samples"]
         if wts.sum() == 0:
-            return pd.Series({
-                "N": 0,
-                "RMSE": float("nan"),
-                "Corr": float("nan"),
-            })
+            return pd.Series({"N": 0, "RMSE": float("nan"), "Corr": float("nan")})
         return pd.Series({
             "N": int(wts.sum()),
             "RMSE": round(float(np.average(g["RMSE"], weights=wts)), 3),
-            "Corr": round(
-                float(np.average(g["Corr"].fillna(0), weights=wts)), 3
-            ),
+            "Corr": round(float(np.average(g["Corr"].fillna(0), weights=wts)), 3),
         })
 
     season_agg = results_df.groupby("season").apply(_wagg).reset_index()
@@ -83,15 +81,9 @@ def _print_final_summary(results_df, data, preds, aug_cfg=None):
 
     y_true_all, y_pred_all = [], []
     for season in data.x_test:
-        if season not in preds:
+        if season not in preds or len(data.y_test.get(season, [])) == 0:
             continue
-        era5_safe = np.clip(np.array(data.era5_test[season], dtype="float32"), 0.1, None)
-        y_t = (
-            data.scaler_y.inverse_transform(
-                data.y_test[season].astype("float32")
-            ).flatten()
-            * era5_safe
-        )
+        y_t = inverse_target(data.scaler_y, data.y_test[season])
         y_p = preds[season]
         n = min(len(y_t), len(y_p))
         y_true_all.append(y_t[:n])
@@ -100,33 +92,31 @@ def _print_final_summary(results_df, data, preds, aug_cfg=None):
     if y_true_all:
         y_true_all = np.concatenate(y_true_all)
         y_pred_all = np.concatenate(y_pred_all)
-        
         valid = np.isfinite(y_true_all) & np.isfinite(y_pred_all)
         y_true_all = y_true_all[valid]
         y_pred_all = y_pred_all[valid]
-        
         if len(y_true_all) > 0:
             thr_ext = float(np.percentile(y_true_all, 90))
             mask_ext = y_true_all > thr_ext
             if mask_ext.sum() > 0:
-                rmse_ext = float(
-                    np.sqrt(mean_squared_error(
-                        y_true_all[mask_ext], y_pred_all[mask_ext]
-                    ))
-                )
+                rmse_ext = float(np.sqrt(mean_squared_error(
+                    y_true_all[mask_ext], y_pred_all[mask_ext]
+                )))
                 print(
                     f"\nRMSE extremos (y > P90={thr_ext:.1f} m/s): "
                     f"{rmse_ext:.3f}  N_ext={int(mask_ext.sum())}"
                 )
 
     if aug_cfg and aug_cfg.get("method") not in (None, "none"):
-        y_train = np.concatenate([v.flatten() for v in data.y_train.values()])
+        y_train = inverse_target(
+            data.scaler_y,
+            np.concatenate([v.ravel() for v in data.y_train.values() if len(v)]),
+        )
         p = aug_cfg.get("extreme_percentile", 90)
         thr_aug = float(np.percentile(y_train, p))
-        n_ext_aug = int(np.sum(y_train > thr_aug))
         print(
             f"\nAugmentacao: method={aug_cfg['method']}  "
-            f"extremos_treino={n_ext_aug}  limiar={thr_aug:.3f}"
+            f"extremos_treino={int(np.sum(y_train > thr_aug))}  limiar={thr_aug:.2f} m/s"
         )
 
     print("=" * 60)
@@ -134,39 +124,22 @@ def _print_final_summary(results_df, data, preds, aug_cfg=None):
 
 def _inject_synthetic(data, synthetic_csv: str):
     """
-    Injeta sintéticos (cluster_gan.py ou legado) em data.x_train/y_train/era5_train.
-    Retorna um NOVO `ClusterDataBatch` (não muta `data` — o `data` recebido
-    fica intocado, precedente já usado por `BaseAugmenter._distribute_by_season`
-    via `dataclasses.replace`, `src/pipeline/augmentation/base.py:161`).
+    Injeta sintéticos (cluster_gan.py ou legado) em data.x_train/y_train.
+    Retorna um NOVO `ClusterDataBatch` (não muta `data` — mesmo precedente de
+    `BaseAugmenter._distribute_by_season`, via `dataclasses.replace`).
 
-    data.x_train/y_train são indexados por SEASON (DJF/MAM/JJA/SON), não por
-    cluster_id — o cluster é codificado como coluna one-hot embutida no
-    último timestep de cada sequência (feature_names = avail_features +
-    cluster_cols). Por isso, para cada cluster sintético precisamos: (1)
-    localizar o índice da coluna one-hot desse cluster, (2) mascarar as
-    sequências reais de cada season que pertencem a esse cluster, (3) fazer
-    nearest-neighbor em y ABSOLUTO (reconstituído via scaler_y.inverse_transform
-    * valor ERA5 da própria amostra) — não no y escalado, que não é
-    comparável a rajadas em m/s.
-
-    Para cada alvo sintético (y absoluto) de um cluster, busca a sequência
-    real de treino desse cluster/season com y absoluto mais próximo e reusa
-    (X, era5) dessa amostra, recalculando a razão/escala do alvo sintético
-    a partir do valor ERA5 emprestado — preserva features realistas e
-    ancoragem ERA5 consistente com o que o resto do pipeline espera.
+    Os sintéticos só trazem a rajada (m/s) e o cluster; X vem emprestado da
+    janela REAL de treino do mesmo cluster/season com a rajada mais próxima
+    (nearest-neighbor em m/s, não no y escalonado).
     """
-    import dataclasses
-
     import numpy as np
     import pandas as pd
-    from src.pipeline.data.cluster_preprocessor import SEASONS
 
-    # Cópias rasas dos dicts — as entradas (arrays por season) só são
-    # substituídas, nunca mutadas in-place, então `data.x_train` original
-    # (e as demais seasons não tocadas) seguem intactas.
+    from src.pipeline.data.cluster_preprocessor import SEASONS
+    from src.pipeline.data.target import inverse_target
+
     new_x_train = dict(data.x_train)
     new_y_train = dict(data.y_train)
-    new_era5_train = dict(data.era5_train)
 
     synth = pd.read_csv(synthetic_csv)
     target_col = (
@@ -181,9 +154,10 @@ def _inject_synthetic(data, synthetic_csv: str):
     if "cluster_id" not in synth.columns:
         raise ValueError(f"{synthetic_csv} precisa ter coluna 'cluster_id'.")
 
-    n_cluster_cols = len(data.cluster_ids)
-    n_base = len(data.feature_names) - n_cluster_cols
-    col_idx_by_cluster = {str(cid): n_base + i for i, cid in enumerate(data.cluster_ids)}
+    col_idx_by_cluster = {
+        str(cid): data.feature_names.index(f"cluster_{cid}")
+        for cid in data.cluster_ids if f"cluster_{cid}" in data.feature_names
+    }
     has_season_col = "season" in synth.columns
     season_list = list(SEASONS)
     rng = np.random.default_rng(42)
@@ -194,7 +168,6 @@ def _inject_synthetic(data, synthetic_csv: str):
         if col_idx is None:
             continue
         y_synth_abs = grp[target_col].to_numpy(float)
-        season_synth = grp["season"].to_numpy() if has_season_col else None
 
         counts = {
             s: int(np.sum(new_x_train[s][:, -1, col_idx] == 1))
@@ -205,7 +178,7 @@ def _inject_synthetic(data, synthetic_csv: str):
             continue
 
         if has_season_col:
-            season_assign = season_synth
+            season_assign = grp["season"].to_numpy()
         else:
             avail_seasons = [s for s in counts if counts[s] > 0]
             probs = [counts[s] / total for s in avail_seasons]
@@ -217,47 +190,26 @@ def _inject_synthetic(data, synthetic_csv: str):
             y_s = y_synth_abs[season_assign == season]
             if len(y_s) == 0:
                 continue
-
             mask_real = new_x_train[season][:, -1, col_idx] == 1
             if not np.any(mask_real):
                 continue
 
             x_real = new_x_train[season][mask_real]
-            y_real_scaled = new_y_train[season][mask_real]
-            era5_real = new_era5_train[season][mask_real]
-            era5_real_safe = np.clip(era5_real, 0.1, None)
-            y_real_abs = (
-                data.scaler_y.inverse_transform(y_real_scaled).flatten() * era5_real_safe
-            )
+            y_real_abs = inverse_target(data.scaler_y, new_y_train[season][mask_real])
 
             order = np.argsort(y_real_abs)
-            idx = np.searchsorted(y_real_abs[order], y_s)
-            idx = np.clip(idx, 0, len(y_real_abs) - 1)
-
+            idx = np.clip(np.searchsorted(y_real_abs[order], y_s), 0, len(y_real_abs) - 1)
             x_new = x_real[order[idx]]
-            era5_new = era5_real[order[idx]]
-            ratio_new = (y_s / np.clip(era5_new, 0.1, None)).reshape(-1, 1).astype("float32")
-            y_new_scaled = data.scaler_y.transform(ratio_new)
+            y_new_scaled = data.scaler_y.transform(y_s.reshape(-1, 1)).astype("float32")
 
             new_x_train[season] = np.concatenate([new_x_train[season], x_new], axis=0)
             new_y_train[season] = np.concatenate([new_y_train[season], y_new_scaled], axis=0)
-            new_era5_train[season] = np.concatenate([new_era5_train[season], era5_new], axis=0)
-            # NOTA: data.meta_train[season] (estacao/lat/lon/time por janela)
-            # não é estendido aqui — fica desalinhado com x_train/y_train/
-            # era5_train após a injeção. Inofensivo hoje (só meta_test é lido,
-            # pra montar predictions_by_station.csv a partir do teste, que
-            # nunca recebe sintéticos); só usar meta_train no futuro depois
-            # de estendê-lo aqui também.
+            # NOTA: meta_train não é estendido — só meta_test é lido (para o
+            # predictions_by_station.csv), e o teste nunca recebe sintéticos.
             added += len(y_s)
 
-    print(
-        f"[synthetic] +{added} pares (X_real, y_sintético)"
-        f" injetados de {synthetic_csv}"
-    )
-
-    return dataclasses.replace(
-        data, x_train=new_x_train, y_train=new_y_train, era5_train=new_era5_train,
-    )
+    print(f"[synthetic] +{added} pares (X_real, y_sintético) injetados de {synthetic_csv}")
+    return dataclasses.replace(data, x_train=new_x_train, y_train=new_y_train)
 
 
 def preprocess_lstm_data(
@@ -265,63 +217,37 @@ def preprocess_lstm_data(
     augmentation_method: str | None = None,
     synthetic_csv: str | None = None,
     feature_groups: str | None = None,
-    restrict_coverage: bool = False,
     exp_name_override: str | None = None,
 ):
-    """Carrega o YAML, roda `ClusterPreprocessor` (NetCDF → clusters →
-    climatologia → dataframe → split → scaler/imputer → janelas) e injeta
-    sintéticos (se houver). Extraído de `run()` sem mudança de lógica —
-    `ClusterPreprocessor.run()` já era uma classe/método independente, só a
-    orquestração ao redor (config, ArtifactManager, override de CLI) estava
-    tudo dentro de `run()`.
+    """Carrega/valida o YAML, fixa a semente, constrói o `ClusterDataBatch`
+    (fonte diária ou horária, ver `build_lstm_batch`) e injeta sintéticos.
 
-    Retorna `(data, resolved_exp_name, cfg)` — `resolved_exp_name` é o nome
-    já resolvido pelo `ArtifactManager` (auto-incrementado se `exp_name` era
-    None): quem for treinar a partir daqui deve reconstruir o
-    `ArtifactManager` com esse nome explícito, nunca `None` de novo, senão
-    resolve pra um `expN+1` novo e desalinha do que foi pré-processado aqui.
+    Retorna `(data, resolved_exp_name, cfg)` — quem for treinar deve
+    reconstruir o `ArtifactManager` com esse nome explícito, nunca `None` de
+    novo (senão resolve pra um `expN+1` novo).
     """
-    cfg = _load_config(config)
+    from src.pipeline.data.lstm_sources import build_lstm_batch, validate_lstm_config
+    from src.utils.artifact_manager import ArtifactManager
+    from src.utils.seeding import set_global_seed
+
+    cfg = validate_lstm_config(_load_config(config))
 
     if augmentation_method and "augmentation" in cfg:
         cfg["augmentation"]["method"] = augmentation_method
 
     exp_cfg = cfg["experiment"]
     data_cfg = cfg["data"]
-    prep_cfg = cfg["preprocessing"]
-
-    # CLI sobrepõe o YAML (mesmo padrão de augmentation_method acima) —
-    # feature_groups=None mantém o que estiver em data.feature_groups
-    # (ou "all" se ausente, via resolve_feature_groups).
     if feature_groups is not None:
         data_cfg["feature_groups"] = feature_groups
-    feature_groups = data_cfg.get("feature_groups")
+
+    set_global_seed(int(exp_cfg.get("seed", 42)), deterministic=bool(exp_cfg.get("deterministic", False)))
 
     exp_name = exp_name_override or exp_cfg.get("name")
-
-    from src.utils.artifact_manager import ArtifactManager
     manager = ArtifactManager(exp_cfg["output_dir"], exp_name)
-    output_dir = manager.root
-
     print(f"\n=== Experimento: {exp_name} ===")
-    print(f"Saída: {output_dir}\n")
+    print(f"Saída: {manager.root}\n")
 
-    from src.pipeline.data.cluster_preprocessor import ClusterPreprocessor
-
-    preprocessor = ClusterPreprocessor(
-        raw_dir=data_cfg["raw_dir"],
-        shp_dir=data_cfg["shp_dir"],
-        target_var=data_cfg["target_var"],
-        train_slice=tuple(data_cfg["train_slice"]),
-        val_slice=tuple(data_cfg["val_slice"]),
-        test_slice=tuple(data_cfg["test_slice"]),
-        test_station_fraction=data_cfg["test_station_fraction"],
-        lookback=prep_cfg["lookback"],
-        seed=exp_cfg.get("seed", 42),
-        feature_groups=feature_groups,
-        restrict_coverage=restrict_coverage,
-    )
-    data = preprocessor.run()
+    data = build_lstm_batch(cfg)
 
     if synthetic_csv:
         data = _inject_synthetic(data, synthetic_csv)
@@ -329,133 +255,90 @@ def preprocess_lstm_data(
     return data, manager.exp_dir.name, cfg
 
 
-def _predict_lstm_experts(data, result, trainer, model_name: str) -> dict:
-    """Prediz com os especialistas já treinados. Extraído pra rodar uma
-    única vez — antes `trainer.predict(...)` era chamado 3x com os mesmos
-    argumentos dentro do mesmo `run()` (dentro de
-    `ClusterMetricsEvaluator.evaluate`, dentro de `_print_final_summary`, e
-    de novo aqui) — mesmo resultado, recomputado do zero cada vez (bug
-    real corrigido, ver T2.2 do plano)."""
-    if model_name == "cluster_tr_lstm":
-        return trainer.predict(
-            x_dict=data.x_test,
-            xs_dict=data.x_static_test,
-            models=result.models,
-            era5_dict=data.era5_test,
-            scaler_y=data.scaler_y,
-            feature_names=data.feature_names,
-            cluster_ids=data.cluster_ids,
-        )
+def _predict_lstm_experts(data, result, trainer) -> dict:
+    """Prediz (m/s) uma única vez; reusado por avaliação, resumo e CSVs."""
     return trainer.predict(
         x_dict=data.x_test,
         models=result.models,
-        era5_dict=data.era5_test,
         scaler_y=data.scaler_y,
         feature_names=data.feature_names,
         cluster_ids=data.cluster_ids,
     )
 
 
+def _window_spec(data):
+    from src.pipeline.data.windowing import WindowSpec
+
+    offset = int((data.hourly or {}).get("day_offset_hours", 0))
+    return WindowSpec(data.resolution, int(data.window_length), offset)
+
+
 def train_lstm_and_finalize(
     data, resolved_exp_name: str, cfg: dict, config: str,
     synthetic_csv: str | None = None, ablation_group: str | None = None,
 ) -> None:
-    """Treina os especialistas, avalia, serializa modelos e exporta
-    predições/gráficos. Extraído de `run()` sem mudança de lógica, exceto a
-    correção do predict redundante (ver `_predict_lstm_experts`).
-    `resolved_exp_name` reconstrói o `ArtifactManager` no MESMO diretório
-    que `preprocess_lstm_data` já resolveu (nunca `exp_name=None` de novo —
-    ver docstring de `preprocess_lstm_data`)."""
+    """Treina, avalia, serializa modelos + `dl_metadata.joblib` (schema v2) e
+    exporta predições/gráficos no MESMO diretório resolvido por
+    `preprocess_lstm_data`."""
+    from src.inference.dl_metadata import METADATA_FILENAME, MODEL_NAME, build_dl_metadata
+
     exp_cfg = cfg["experiment"]
     data_cfg = cfg["data"]
-    prep_cfg = cfg["preprocessing"]
-    model_cfg = cfg["model"]
-    train_cfg = cfg["training"]
+    model_cfg = cfg.get("model") or {}
+    train_cfg = cfg.get("training") or {}
     viz_cfg = cfg.get("visualization", {})
     feature_groups = data_cfg.get("feature_groups")
+    seed = int(exp_cfg.get("seed", 42))
 
     from src.utils.artifact_manager import ArtifactManager
     manager = ArtifactManager(exp_cfg["output_dir"], exp_name=resolved_exp_name)
     output_dir = manager.root
 
-    model_params = model_cfg.get("params", {})
-    model_name = model_cfg.get("name", "cluster_dual_head_lstm")
+    model_params = dict(model_cfg.get("params") or {})
 
-    if model_name == "cluster_tr_lstm":
-        from src.pipeline.training.cluster_tr_trainer import ClusterTRTrainer
-
-        trainer = ClusterTRTrainer(
-            units=model_params.get("units", 64),
-            static_hidden=model_params.get("static_hidden", 32),
-            dropout=model_params.get("dropout", 0.4),
-            dropout_static=model_params.get("dropout_static", 0.05),
-            recurrent_dropout=model_params.get("recurrent_dropout", 0.0),
-            l2_reg=model_params.get("l2_reg", 0.01),
-            learning_rate=model_params.get("learning_rate", 0.001),
-            huber_delta=model_params.get("huber_delta", 1.5),
-            weight_normal=model_params.get("weight_normal", 0.7),
-            weight_extreme=model_params.get("weight_extreme", 0.3),
-            extreme_weight=model_params.get("extreme_weight", 20.0),
-            extreme_threshold=model_params.get("extreme_threshold", 1.5),
-            epochs=train_cfg.get("epochs", 50),
-            batch_size=train_cfg.get("batch_size", 64),
-            patience=train_cfg.get("patience", 5),
-            min_samples=train_cfg.get("min_samples", 10),
-        )
-    else:
-        from src.pipeline.training.cluster_trainer import ClusterTrainer
-
-        trainer = ClusterTrainer(
-            units=model_params.get("units", 64),
-            dropout=model_params.get("dropout", 0.4),
-            l2_reg=model_params.get("l2_reg", 0.01),
-            learning_rate=model_params.get("learning_rate", 0.001),
-            weight_normal=model_params.get("weight_normal", 0.7),
-            weight_extreme=model_params.get("weight_extreme", 0.3),
-            extreme_weight=model_params.get("extreme_weight", 20.0),
-            extreme_threshold=model_params.get("extreme_threshold", 1.5),
-            epochs=train_cfg.get("epochs", 50),
-            batch_size=train_cfg.get("batch_size", 64),
-            patience=train_cfg.get("patience", 5),
-            min_samples=train_cfg.get("min_samples", 10),
-        )
+    from src.pipeline.training import cluster_trainer
+    trainer = cluster_trainer.ClusterTrainer(
+        units=model_params.get("units", 96),
+        dropout=model_params.get("dropout", 0.3),
+        huber_delta=model_params.get("huber_delta", 1.0),
+        learning_rate=model_params.get("learning_rate", 0.001),
+        epochs=train_cfg.get("epochs", 50),
+        batch_size=train_cfg.get("batch_size", 64),
+        patience=train_cfg.get("patience", 5),
+        min_samples=train_cfg.get("min_samples", 10),
+        seed=seed,
+    )
 
     aug_cfg = cfg.get("augmentation")
     if aug_cfg:
         from src.pipeline.augmentation.factory import augmenter_factory
 
-        # Checkpoint dentro do diretório do próprio experimento — sobrevive
-        # a timeout/crash do processo (ver src/pipeline/augmentation/
-        # checkpoint.py): um retry do MESMO exp_name retoma o treino do GAN/
-        # diffusion em vez de recomeçar do zero, desde que o volume Modal
-        # tenha sido commitado com o checkpoint parcial antes do timeout.
-        checkpoint_dir = str(output_dir / "_gan_checkpoint")
-        augmenter = augmenter_factory(aug_cfg, checkpoint_dir=checkpoint_dir)
+        # Checkpoint dentro do diretório do experimento — um retry do MESMO
+        # exp_name retoma o treino do GAN/diffusion (src/pipeline/augmentation/checkpoint.py).
+        augmenter = augmenter_factory(aug_cfg, checkpoint_dir=str(output_dir / "_gan_checkpoint"))
         if augmenter is not None:
-            print(
-                "\n[augmentation] Gerando amostras sinteticas de extremos..."
-            )
+            print("\n[augmentation] Gerando amostras sinteticas de extremos...")
             data = augmenter.fit_augment(data)
 
-    print("\n[training] Iniciando treinamento dos especialistas...")
+    print("\n[training] Iniciando treinamento (1 LSTM por cluster)...")
     result = trainer.fit(data)
 
     histories_path = manager.get_root_path("histories.json")
-    json_histories: dict = {}
-    for cluster_id, season_dict in result.histories.items():
-        json_histories[str(cluster_id)] = {
+    json_histories = {
+        str(cluster_id): {
             key: {k: [float(v) for v in vals] for k, vals in hist.items()}
             for key, hist in season_dict.items()
         }
+        for cluster_id, season_dict in result.histories.items()
+    }
     histories_path.write_text(json.dumps(json_histories, indent=2))
     print(f"\nHistórico salvo: {histories_path}")
 
     from src.pipeline.validation.cluster_metrics import ClusterMetricsEvaluator
 
-    print("\n[eval] Avaliando no conjunto de teste...")
-    preds = _predict_lstm_experts(data, result, trainer, model_name)
-    evaluator = ClusterMetricsEvaluator()
-    results_df = evaluator.evaluate(data, result, preds)
+    print("\n[eval] Avaliando no conjunto de teste (Jan/Abr/Jul/Out)...")
+    preds = _predict_lstm_experts(data, result, trainer)
+    results_df = ClusterMetricsEvaluator().evaluate(data, result, preds)
     print(results_df.to_string(index=False))
 
     results_path = manager.get_partial_path("csv", "results.csv")
@@ -476,11 +359,15 @@ def train_lstm_and_finalize(
         if not unified_results_df.empty else []
     )
     meta = {
-        "model_name": model_name,
+        "model_name": MODEL_NAME,
         "model_params": model_params,
-        "train_slice": list(data_cfg["train_slice"]),
-        "val_slice": list(data_cfg["val_slice"]),
-        "test_slice": list(data_cfg["test_slice"]),
+        "resolution": data.resolution,
+        "window": _window_spec(data).to_dict(),
+        "split": data.split.to_dict(),
+        "interp_method": data.interp_method,
+        "climatology": data.climatology,
+        "hourly": data.hourly,
+        "seed": seed,
         "augmentation": aug_cfg,
         "synthetic_csv": synthetic_csv,
         "feature_groups": feature_groups,
@@ -496,36 +383,34 @@ def train_lstm_and_finalize(
 
     _print_final_summary(results_df, data, preds, aug_cfg)
 
-    # ── Serializar Modelos para Inferência Espacial ───────────────────────
+    # ── Serializar modelos + metadados v2 para inferência ────────────────
     import joblib
     models_dir = manager.get_model_dir()
-    
-    metadata = {
-        "scaler_x": data.scaler_x,
-        "scaler_y": data.scaler_y,
-        "imputer_x": data.imputer_x,
-        "feature_names": data.feature_names,
-        "lookback": prep_cfg["lookback"],
-        "target_var": data_cfg["target_var"],
-        "model_name": model_name,
-        # Usado por DLSpatialCorrector pra decidir cabeça normal vs. extrema
-        # na inferência espacial — antes hardcoded lá, agora vem do mesmo
-        # valor efetivamente usado no treino/predict (ClusterTrainer.predict).
-        "extreme_threshold": model_params.get("extreme_threshold", 1.5),
-    }
-    joblib.dump(metadata, models_dir / "dl_metadata.joblib")
-    
+    joblib.dump(
+        build_dl_metadata(
+            scaler_x=data.scaler_x,
+            scaler_y=data.scaler_y,
+            feature_names=data.feature_names,
+            window=_window_spec(data),
+            split=data.split,
+            interp_method=data.interp_method,
+            climatology=data.climatology,
+            hourly=data.hourly,
+            model_params=model_params,
+            seed=seed,
+            target_var=data_cfg.get("target_var", "daily_wind_gust_max"),
+        ),
+        models_dir / METADATA_FILENAME,
+    )
+
     n_saved = 0
     for cid, season_models in result.models.items():
         if not season_models:
-            # nenhuma temporada teve dados suficientes pra esse cluster
-            # (ex.: cobertura ERA5-18Z/BT55 insuficiente) — nada a salvar.
-            continue
-        # A inferência espacial usa a predição global (season="global")
-        # Se não houver global, tenta DJF, etc, mas o correto é treinar um global
-        model_to_save = season_models.get("global") or next(iter(season_models.values()))
-        model_path = models_dir / f"best_model_c{cid}.keras"
-        model_to_save.save(model_path)
+            continue  # cluster sem dados suficientes — nada a salvar
+        model_to_save = season_models.get("global")
+        if model_to_save is None:
+            model_to_save = next(iter(season_models.values()))
+        model_to_save.save(models_dir / f"best_model_c{cid}.keras")
         n_saved += 1
     print(f"\n[training] {n_saved} modelos salvos em {models_dir}")
 
@@ -534,9 +419,6 @@ def train_lstm_and_finalize(
         get_cluster_season_arrays, get_cluster_season_station_arrays,
     )
 
-    # `preds` já foi calculado acima (ver `_predict_lstm_experts`) — reusa
-    # em vez de chamar `trainer.predict(...)` uma terceira vez com os
-    # mesmos argumentos.
     pred_frames = []
     station_pred_frames = []
     for season in data.x_test:
@@ -567,8 +449,6 @@ def train_lstm_and_finalize(
         pd.DataFrame(columns=CORE_PREDICTIONS_COLUMNS).to_csv(predictions_path, index=False)
     print(f"Predições salvas: {predictions_path}")
 
-    # predictions_by_station.csv — mesma granularidade que cluster_mlp.py já
-    # produz (estacao/lat/lon reais, não só o cluster_id agregado acima).
     station_predictions_path = manager.get_prediction_path("predictions_by_station.csv")
     if station_pred_frames:
         pd.concat(station_pred_frames, ignore_index=True).to_csv(
@@ -603,17 +483,15 @@ def run(
     augmentation_method: str | None = None,
     synthetic_csv: str | None = None,
     feature_groups: str | None = None,
-    restrict_coverage: bool = False,
     ablation_group: str | None = None,
     exp_name_override: str | None = None,
     **_,
 ) -> None:
-    """Executa o pipeline dual-head LSTM por cluster via YAML config —
-    composição de `preprocess_lstm_data` + `train_lstm_and_finalize`
-    (extraídas sem mudança de comportamento; ver as duas pra detalhe)."""
+    """Executa a LSTM por cluster via YAML — composição de
+    `preprocess_lstm_data` + `train_lstm_and_finalize`."""
     data, resolved_exp_name, cfg = preprocess_lstm_data(
         config, augmentation_method, synthetic_csv, feature_groups,
-        restrict_coverage, exp_name_override,
+        exp_name_override,
     )
     train_lstm_and_finalize(
         data, resolved_exp_name, cfg, config, synthetic_csv, ablation_group,

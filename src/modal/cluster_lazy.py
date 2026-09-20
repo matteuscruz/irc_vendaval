@@ -56,8 +56,6 @@ REMOTE_DATASET_DIR = "/dataset"
 DATASET_SENTINELS = [
     "raw/INMET_Stratified.nc",
     "raw/ERA5_Stratified.nc",
-    "raw/dados_era5_parana_18utc",
-    "raw/dados_temperatura_brilho_BT55",
     "raw/ERA5_Features_Basin_2000_2026.nc",
 ]
 
@@ -90,10 +88,6 @@ image = (
         "scipy>=1.10.0",
         "cartopy>=0.22.0",
         "shapely>=2.0.0",
-        # BT55: leitura de parquets mensais
-        "pyarrow>=14.0.0",
-        # ERA5-18UTC: xarray usa dask internamente
-        "dask>=2024.1.0",
     )
     .pip_install(
         "lazypredict[boost]>=0.3.0",
@@ -141,13 +135,40 @@ def _dataset_exists_in_volume() -> bool:
         entries = dataset_volume.listdir("/", recursive=True)
         paths = {e.path.lstrip("/") for e in entries}
         # listdir recursivo lista arquivos, não a pasta em si — prefixo cobre
-        # tanto sentinels de arquivo quanto de diretório (ex: dados_bt55/*.parquet).
+        # tanto sentinels de arquivo quanto de diretório.
         return all(
             any(p == s or p.startswith(s + "/") for p in paths)
             for s in DATASET_SENTINELS
         )
     except Exception:
         return False
+
+
+def _sync_new_features(local_raw: Path) -> None:
+    """Sobe arquivos de dataset/raw/new_features ausentes (ou com tamanho
+    diferente) no volume — features novas entram sem re-enviar o dataset
+    inteiro. Caches locais (`_*`) não sobem."""
+    local_root = local_raw / "new_features"
+    if not local_root.is_dir():
+        return
+    try:
+        remote = {
+            e.path.lstrip("/"): e.size
+            for e in dataset_volume.listdir("/raw/new_features", recursive=True)
+        }
+    except Exception:
+        remote = {}
+    pending = [
+        f for f in sorted(local_root.rglob("*.nc"))
+        if not f.name.startswith("_")
+        and remote.get(f"raw/{f.relative_to(local_raw).as_posix()}") != f.stat().st_size
+    ]
+    if not pending:
+        return
+    print(f"Enviando {len(pending)} arquivo(s) novo(s) de new_features para o volume...")
+    with dataset_volume.batch_upload(force=True) as upload:
+        for f in pending:
+            upload.put_file(str(f), f"/raw/{f.relative_to(local_raw).as_posix()}")
 
 
 def _ensure_dataset(force: bool = False) -> None:
@@ -167,6 +188,7 @@ def _ensure_dataset(force: bool = False) -> None:
             f"Dataset já disponível no volume "
             f"'{DATASET_VOLUME_NAME}' — pulando upload."
         )
+        _sync_new_features(local_raw)
         return
 
     action = "Re-enviando" if force else "Enviando"
@@ -197,12 +219,14 @@ _VOLUMES = {
     image=image, volumes=_VOLUMES, timeout=21600, memory=32768,
     nonpreemptible=True,  # merge sem checkpoint — preempção reinicia do zero
 )
-def build_dataset_cache() -> str:
+def build_dataset_cache(interp_method: str = "nearest") -> str:
     """Gera o cache do merge ERA5 completo (INMET × ERA5_Stratified ×
-    ERA5-18UTC × BT55 × ERA5-Basin) UMA vez, no volume Modal (onde dask está
-    disponível pro ERA5-18UTC) — reaproveitado por GAN/Lazy/MLP/LSTM via
+    ERA5-Basin) UMA vez, no volume Modal — reaproveitado por GAN/Lazy/MLP/LSTM via
     NetCDFLoader.load_extended(), evitando recalcular o merge caro em cada
     uma das dezenas de invocações da matriz de ablation.
+
+    `interp_method="bilinear"` (usado pela LSTM v2) grava um cache separado,
+    `era5_merged_cache_bilinear.nc` — o `nearest` de lazy/mlp/gan não muda.
     """
     dataset_volume.reload()
 
@@ -210,19 +234,23 @@ def build_dataset_cache() -> str:
     from src.data.netcdf_loader import NetCDFLoader
 
     raw_dir = Path(REMOTE_DATASET_DIR) / "raw"
-    cache_path = raw_dir / NetCDFLoader.CACHE_FILENAME
+    cache_path = raw_dir / NetCDFLoader.merged_cache_name(interp_method)
     # Checkpoint do merge das 4 fontes (ANTES do rebuild_original_from_basin,
     # que é onde timeout/preempção têm historicamente batido) — se essa
     # função for re-executada depois de uma falha, pula direto pro passo caro
     # seguinte em vez de refazer os ~5-10min de carregamento das 4 fontes.
-    checkpoint_path = raw_dir / "era5_merge_checkpoint.nc"
+    # Sufixado pelo método: um checkpoint nearest não pode alimentar o bilinear.
+    suffix = "" if interp_method == "nearest" else f"_{interp_method}"
+    checkpoint_path = raw_dir / f"era5_merge_checkpoint{suffix}.nc"
 
-    print("[modal] Gerando cache do merge ERA5 (ignora cache existente)...")
+    print(f"[modal] Gerando cache do merge ERA5 {cache_path.name} "
+          f"(interp={interp_method}, ignora cache existente)...")
     _t0 = time.time()
     ds_inmet, ds_era5 = NetCDFLoader(str(raw_dir)).load_extended(
         use_cache=False,
         checkpoint_path=checkpoint_path,
         on_checkpoint_saved=dataset_volume.commit,
+        interp_method=interp_method,
     )
     print(f"[modal] Merge concluído em {time.time() - _t0:.0f}s: "
           f"{len(ds_inmet.estacao)} estações, "
@@ -231,7 +259,7 @@ def build_dataset_cache() -> str:
     if cache_path.exists():
         cache_path.unlink()
     _t1 = time.time()
-    ds_era5.to_netcdf(cache_path)
+    NetCDFLoader.without_new_features(ds_era5).to_netcdf(cache_path)
     print(f"[modal] Cache salvo em {time.time() - _t1:.0f}s: {cache_path} "
           f"({cache_path.stat().st_size / 1024**2:.1f} MB)")
 
@@ -270,7 +298,6 @@ def _base_cmd(
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
     feature_groups: str | None = None,
-    restrict_coverage: bool = False,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -301,8 +328,6 @@ def _base_cmd(
         cmd += ["--eval-window", eval_window]
     if feature_groups:
         cmd += ["--feature-groups", feature_groups]
-    if restrict_coverage:
-        cmd += ["--restrict-coverage"]
     return cmd
 
 
@@ -328,7 +353,6 @@ def discover_clusters(
     eval_window: str = "monthly",
     exp_name: str | None = None,
     feature_groups: str | None = None,
-    restrict_coverage: bool = False,
 ) -> tuple[str, list[str]]:
     """Carrega os dados, resolve o exp e lista os clusters presentes."""
     import subprocess
@@ -339,8 +363,7 @@ def discover_clusters(
         extra += ["--exp-name", exp_name]
     base = _base_cmd(cluster_merge, synth, synth_n_above,
                      synth_n_below, extreme_percentile, stratify_seasons,
-                     n_neighbor_clusters, eval_window, feature_groups,
-                     restrict_coverage)
+                     n_neighbor_clusters, eval_window, feature_groups)
     res = subprocess.run(
         base + extra,
         cwd=REMOTE_APP_DIR, text=True, capture_output=True,
@@ -379,7 +402,6 @@ def process_cluster(
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
     feature_groups: str | None = None,
-    restrict_coverage: bool = False,
 ) -> tuple[str, bool]:
     """Treina todos os modelos de UM cluster no seu próprio container."""
     import subprocess
@@ -389,8 +411,7 @@ def process_cluster(
     print(f"[modal] ▶ Cluster {cid} (exp {exp_name})")
     base = _base_cmd(cluster_merge, synth, synth_n_above,
                      synth_n_below, extreme_percentile, stratify_seasons,
-                     n_neighbor_clusters, eval_window, feature_groups,
-                     restrict_coverage)
+                     n_neighbor_clusters, eval_window, feature_groups)
     # Streaming linha-a-linha (em vez de capture_output + print no final) —
     # com 14 clusters rodando em paralelo (.starmap), cada linha vem
     # prefixada com o cluster de origem pra dar pra acompanhar ao vivo qual
@@ -424,7 +445,6 @@ def aggregate_clusters(
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
     feature_groups: str | None = None,
-    restrict_coverage: bool = False,
     ablation_group: str | None = None,
 ) -> list[str]:
     """Junta os parciais → CSV final + heatmap + run_meta."""
@@ -435,8 +455,7 @@ def aggregate_clusters(
     print("[modal] Construindo agregados (CSV + heatmap + meta)...")
     base = _base_cmd(cluster_merge, synth, synth_n_above,
                      synth_n_below, extreme_percentile, stratify_seasons,
-                     n_neighbor_clusters, eval_window, feature_groups,
-                     restrict_coverage)
+                     n_neighbor_clusters, eval_window, feature_groups)
     extra = ["--exp-name", exp_name, "--aggregate-only"]
     if ablation_group:
         extra += ["--ablation-group", ablation_group]
@@ -567,6 +586,7 @@ def main(
     only_download: bool = False,
     only_upload_dataset: bool = False,
     build_cache: bool = False,
+    interp_method: str = "nearest",
     local_dir: str = "artifacts/lazy_modal",
     force_dataset_upload: bool = False,
     cluster_merge: str = "",
@@ -579,7 +599,6 @@ def main(
     eval_window: str = "monthly",
     exp_name: str = "",
     feature_groups: str = "",
-    restrict_coverage: bool = False,
     ablation_group: str = "",
     spatial_year: str = "2023",
     spatial_smoothing: str = "gaussian",
@@ -594,10 +613,12 @@ def main(
     --only-upload-dataset  Só sincroniza dataset/raw+shp pro volume; não roda
                            nem baixa (volume compartilhado por lazy/mlp/lstm/gan)
     --build-cache          Gera/regenera o cache do merge ERA5 completo no
-                           volume (era5_merged_cache.nc) e sai; roda no Modal
-                           pra ter dask disponível (ERA5-18UTC). GAN/Lazy/MLP/
-                           LSTM passam a usar esse cache automaticamente.
-    --only-clusters        Retoma só os clusters listados (ex: "2,5,9,13"),
+                           volume (era5_merged_cache.nc) e sai. GAN/Lazy/MLP/
+                           LSTM passam a usar esse cache automaticamente
+                           (features novas ficam fora dele, sempre relidas).
+    --interp-method        Com --build-cache: nearest (default, cache atual)
+                           ou bilinear (LSTM v2 → era5_merged_cache_bilinear.nc)
+    --only-clusters       Retoma só os clusters listados (ex: "2,5,9,13"),
                            em vez de rodar todos de novo — usa o MESMO
                            --exp-name de uma run anterior interrompida
                            (ex: por timeout), sem reprocessar os que já têm
@@ -608,12 +629,11 @@ def main(
     --synthetic-csv        CSV sintético (local ou caminho no volume), ex:
                            "gan_clusters/exp1/synthetic_augment.csv"
     --exp-name             Nome do experimento; senão autoincrementa exp{n}
-    --feature-groups       Grupos separados por vírgula: original, era5_18z,
-                           bt55 (default: todos)
-    --restrict-coverage    Restringe às estações com cobertura REAL de
-                           era5_18z/bt55 (~46-57/243) em vez de imputar NaN
-                           nas demais — recomendado com --feature-groups
-                           incluindo era5_18z/bt55 (ex: braço "newfeatures")
+    --feature-groups       Grupos separados por vírgula: original, era5_basin,
+                           new_features, new_features_static,
+                           new_features_dynamic (ou 'all'; default: original).
+                           Com qualquer new_features*, só treinam clusters
+                           100% cobertos pelas features pedidas
     --ablation-group       Tag opcional p/ agrupar experimentos de ablation
     --spatial-year         Ano para gerar mapa corrigido (default: 2023)
     --spatial-smoothing    Suavização: gaussian | none (default: gaussian)
@@ -634,7 +654,7 @@ def main(
         print("\nGerando cache do merge ERA5 completo no Modal (via spawn — "
               "desacoplado da conexão local; uma queda de rede aqui não "
               "cancela mais a task remota)...")
-        call = build_dataset_cache.spawn()
+        call = build_dataset_cache.spawn(interp_method=interp_method)
         print(f"Function call id: {call.object_id}")
         print("Se a conexão cair durante o .get(), retome com:\n"
               "  python3 -c \"import modal; "
@@ -676,7 +696,6 @@ def main(
         eval_window=eval_window,
         exp_name=exp_name or None,
         feature_groups=feature_groups or None,
-        restrict_coverage=restrict_coverage,
     )
     print(f"Experimento: {resolved_exp} | {len(clusters)} cluster(s)")
 
@@ -690,7 +709,7 @@ def main(
     args = [
         (cid, resolved_exp, cm, synth, n_above, n_below,
          extreme_percentile, stratify_seasons, n_neighbor_clusters, eval_window,
-         feature_groups or None, restrict_coverage)
+         feature_groups or None)
         for cid in clusters
     ]
     results = list(process_cluster.starmap(args))
@@ -710,7 +729,6 @@ def main(
         n_neighbor_clusters=n_neighbor_clusters,
         eval_window=eval_window,
         feature_groups=feature_groups or None,
-        restrict_coverage=restrict_coverage,
         ablation_group=ablation_group or None,
     )
     print(

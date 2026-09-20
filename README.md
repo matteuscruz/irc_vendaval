@@ -25,7 +25,7 @@ estratificado em **14 clusters espaciais**. Foco em eventos extremos de vento (v
 > A GAN gera dados sintéticos de extremos; o LazyPredict avalia dezenas de modelos por cluster
 > usando as features atuais, dados de clusters vizinhos e avaliação por janelas de deploy
 > (mensal/quinzenal). Para a rede neural principal, o caminho ativo é `cluster_lstm`
-> com a variante padrão `cluster_dual_head_lstm`.
+> (LSTM(96) → Dropout(0.3) → Dense(1), Huber, saída em m/s).
 
 ---
 
@@ -41,7 +41,9 @@ não o valor absoluto. Na inferência: `ŷ_corrigido = razão_predita × ERA5_wi
 
 **Princípio central — sem vazamento de dados:** todas as features de entrada
 são derivadas exclusivamente do ERA5. Nenhuma observação de estação entra como
-feature (apenas como target no treino).
+feature (apenas como target no treino) — nem lags da rajada observada, nem
+climatologia/mediana por estação — porque na correção da grade ERA5 não existe
+estação medindo. A inferência recusa artefatos treinados com essas features.
 
 ---
 
@@ -88,9 +90,6 @@ Legenda:
 | Sazonalidade | Derivada na pipeline | `day_sin`, `day_cos` |
 | Climatologia ERA5 | Derivada na pipeline | `era5_clim_wind` (média histórica do `wind_mag_max` por dia-do-ano) |
 | Localização | Meta da estação | `latitude`, `longitude` (coordenadas da estação) |
-| Climatologia INMET* | Derivada na pipeline | `gust_P50` (mediana observada por estação) |
-
-\* `gust_P50` é calculado em runtime a partir do split de treino; amostras sintéticas recebem a mediana do cluster.
 
 ---
 
@@ -131,16 +130,18 @@ Ensemble Model Output Statistics com redes neurais (Keras/TensorFlow):
 
 Loss: Threshold-weighted CRPS (twCRPS) para eventos extremos.
 
-### 4.2 LSTM Dual-Head por Cluster (`cluster_lstm`)
-Pipeline sequencial usando dados NetCDF brutos. Arquitetura dual-head:
-cabeça de valor + cabeça de incerteza por cluster espacial. Suporta
-também a variante **TRWindBC** com condicionamento por features estáticas
-de estação (lat, lon, percentis de rajada).
+### 4.2 LSTM por Cluster (`cluster_lstm`)
+Pipeline sequencial usando dados NetCDF brutos: uma LSTM de saída única por
+cluster (`LSTM(96) → Dropout(0.3) → Dense(1)`, Huber + Adam, alvo em m/s),
+com dados diários (janela de 7 dias até o dia-alvo) ou horários (24 h do
+dia-alvo), interpolação bilinear grade→estação e split por blocos de mês
+(teste = Jan/Abr/Jul/Out de todos os anos). Ver
+`documentation/04_cluster_lstm.md`.
 
 ### 4.3 Screening LazyPredict (`cluster_lazy`)
 LazyPredict avalia dezenas de modelos sklearn por cluster, com as seguintes capacidades:
 
-**Feature engineering completo (27 features):** o pipeline usa o conjunto expandido de features descrito na seção 2, incluindo direção do vento, lags longos, rolling stats e a climatologia observada por estação (`gust_P50`).
+**Feature engineering completo (27 features):** o pipeline usa o conjunto expandido de features descrito na seção 2, incluindo direção do vento, lags longos, rolling stats.
 
 **Compartilhamento entre clusters vizinhos (`--n-neighbor-clusters N`):** dados reais e sintéticos dos N clusters geograficamente mais próximos entram no treino. A vizinhança é calculada por distância euclidiana entre centroides das estações. A validação permanece no cluster-alvo para medir a performance sem contaminação.
 
@@ -199,7 +200,7 @@ subsequentes. Ela produz o vetor completo `[features ERA5 + target]`:
 
 ### 4.6 Estado atual da pilha de treino
 Hoje o código expõe três famílias principais de treino por cluster:
-- `cluster_lstm`: LSTM dual-head em Keras/TensorFlow, com a configuração de produção `cluster_dual_head_lstm`.
+- `cluster_lstm`: LSTM de saída única em Keras/TensorFlow (`model.name: cluster_lstm`, config `experiment_cluster_lstm_modal.yaml`).
 - `cluster_mlp`: `MLPRegressor` do scikit-learn com reamostragem/weighting dos extremos e alvo em razão `INMET/ERA5`.
 - `cluster_lazy`: benchmark automático com LazyPredict, que seleciona o melhor regressor por cluster e salva o campeão para inferência espacial.
 
@@ -210,16 +211,16 @@ Hoje o código expõe três famílias principais de treino por cluster:
 ### `cluster_lstm`
 
 Arquitetura principal em produção:
-- LSTM com duas cabeças de saída.
-- Cabeça normal com Huber loss.
-- Cabeça extrema com `robust_extreme_loss`.
-- Variante `cluster_tr_lstm` disponível no código para duas entradas, mas não é a configuração padrão de produção.
-- A feature engineering é obrigatória na pipeline; o que é configurável são os grupos de features (`feature_groups`) e o recorte de cobertura (`restrict_coverage`).
+- `Input(T, F) → LSTM(96) → Dropout(0.3) → Dense(1)`, Huber + Adam, rajada em m/s.
+- Fonte diária ou horária (`data.resolution`), interpolação `nearest`/`bilinear`.
+- Split por blocos de mês com purga de janela.
+- Artefatos da antiga LSTM dual-head/TR são recusados pela inferência — retreinar.
+- A feature engineering é obrigatória na pipeline; o configurável são os grupos de features (`feature_groups`: `original`, `era5_basin`, `new_features`). Nada é imputado — ver `documentation/02_dados_e_preprocessamento.md`.
 
 ### `cluster_mlp`
 
 Pipeline de baseline supervisionado com `MLPRegressor`:
-- Pré-processamento com imputação por média e `RobustScaler`.
+- Pré-processamento com `RobustScaler` (sem imputação).
 - Alvo treinado como razão `INMET/ERA5`.
 - Reamostragem dos eventos extremos por `extreme_power`.
 - Inferência espacial salva o artefato com `target_kind: ratio`.
@@ -343,20 +344,23 @@ python main.py cluster_gan \
 > A versão fixa pode fazer clusters pequenos serem dominados
 > por sintéticos, degradando o treino.
 
-### LSTM Dual-Head por Cluster (`cluster_lstm`)
+### LSTM por Cluster (`cluster_lstm`)
 
 ```bash
+# Cache do merge com interpolação bilinear (uma vez; a config v2 usa bilinear)
+modal run src/modal/cluster_lazy.py --build-cache --interp-method bilinear
+
 # Local
 python main.py cluster_lstm \
-    --config config/experiment_cluster_tr_lstm_modal.yaml
+    --config config/experiment_cluster_lstm_modal.yaml
 
 # Na nuvem (Modal)
 modal run src/modal/cluster_lstm.py \
-    --config experiment_cluster_tr_lstm_modal.yaml
+    --config experiment_cluster_lstm_modal.yaml
 
 # Com augmentation via YAML
 modal run src/modal/cluster_lstm.py \
-    --config experiment_cluster_tr_lstm_modal.yaml \
+    --config experiment_cluster_lstm_modal.yaml \
     --augmentation-method extreme_gan
 ```
 
@@ -464,16 +468,20 @@ irc_vendaval/
 │   ├── data/
 │   │   ├── netcdf_loader.py        # Carrega e agrega INMET + ERA5 para diário
 │   │   ├── cluster_assigner.py     # Spatial join estação → cluster
-│   │   ├── climatology.py          # Média ERA5 por dia-do-ano (sem leakage)
-│   │   └── static_features.py      # Features estáticas por estação (TRWindBC)
+│   │   ├── climatology.py          # Climatologia por dia-do-ano e harmônica (sem leakage)
+│   │   ├── interp.py               # Grade→ponto: nearest / bilinear
+│   │   └── static_features.py      # Features estáticas por estação
 │   ├── models/
-│   │   └── cluster_tr_lstm_builder.py  # LSTM dual-branch com condicionamento estático
+│   │   └── cluster_lstm_builder.py # LSTM(96) → Dropout → Dense(1), Huber
 │   ├── pipeline/                   # Módulos LSTM / EMOS (baseline)
 │   │   ├── data/
-│   │   │   └── cluster_preprocessor.py
+│   │   │   ├── cluster_preprocessor.py  # ClusterDataBatch + fonte diária
+│   │   │   ├── hourly_builder.py        # fonte horária (24 h do dia-alvo)
+│   │   │   ├── lstm_sources.py          # validação do YAML + despacho por resolução
+│   │   │   ├── splits.py                # split por blocos de mês, purga, anulação de lags
+│   │   │   └── windowing.py             # convenção única de janelas
 │   │   ├── training/
-│   │   │   ├── cluster_trainer.py
-│   │   │   └── cluster_tr_trainer.py  # Variante TRWindBC
+│   │   │   └── cluster_trainer.py
 │   │   └── validation/
 │   │       └── cluster_metrics.py
 │   ├── gan/
@@ -486,7 +494,7 @@ irc_vendaval/
 │   └── visualization/
 │       └── cluster_plots.py
 │
-├── config/                         # YAMLs de experimento (cluster_lstm / cluster_tr_lstm)
+├── config/                         # YAMLs de experimento (cluster_lstm, schema v2)
 │
 ├── dataset/
 │   ├── raw/                        # NetCDF: INMET + ERA5

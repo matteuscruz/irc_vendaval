@@ -43,12 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     p1.add_argument("--augmentation-method", default=None)
     p1.add_argument("--synthetic-csv", default=None)
     p1.add_argument("--feature-groups", default=None,
-                    help="Grupos separados por vírgula: original, era5_18z, bt55 (ou 'all'); "
+                    help="Grupos separados por vírgula: original, era5_basin, new_features, "
+                         "new_features_static, new_features_dynamic (ou 'all'); "
                          "sobrepõe data.feature_groups do YAML")
-    p1.add_argument("--restrict-coverage", action="store_true",
-                    help="Restringe às estações com cobertura REAL de era5_18z/bt55 "
-                         "(~46-57/243), em vez de treinar com NaN/imputação nas demais. "
-                         "Sem efeito se --feature-groups não incluir era5_18z/bt55.")
     p1.add_argument("--ablation-group", default=None,
                     help="Tag opcional para agrupar experimentos de ablation no dashboard")
     p1.add_argument("--exp-name", default=None,
@@ -65,12 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     p2.add_argument("--max-iter", type=int, default=500)
     p2.add_argument("--cluster-merge", default=None)
     p2.add_argument("--synthetic-csv", default=None)
-    p2.add_argument("--feature-groups", default="original,era5_18z,bt55",
-                    help="Grupos separados por vírgula: original, era5_18z, bt55 (ou 'all')")
-    p2.add_argument("--restrict-coverage", action="store_true",
-                    help="Restringe às estações com cobertura REAL de era5_18z/bt55 "
-                         "(~46-57/243), em vez de treinar com NaN/imputação nas demais. "
-                         "Sem efeito se --feature-groups não incluir era5_18z/bt55.")
+    p2.add_argument("--feature-groups", default="original",
+                    help="Grupos separados por vírgula: original, era5_basin, new_features, "
+                         "new_features_static, new_features_dynamic (ou 'all')")
     p2.add_argument("--ablation-group", default=None,
                     help="Tag opcional para agrupar experimentos de ablation no dashboard")
     _add_spatial_validation_args(p2)
@@ -96,12 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     p3.add_argument("--cluster-id", default=None)
     p3.add_argument("--aggregate-only", action="store_true")
     p3.add_argument("--list-clusters", action="store_true")
-    p3.add_argument("--feature-groups", default="original,era5_18z,bt55",
-                    help="Grupos separados por vírgula: original, era5_18z, bt55 (ou 'all')")
-    p3.add_argument("--restrict-coverage", action="store_true",
-                    help="Restringe às estações com cobertura REAL de era5_18z/bt55 "
-                         "(~46-57/243), em vez de treinar com NaN/imputação nas demais. "
-                         "Sem efeito se --feature-groups não incluir era5_18z/bt55.")
+    p3.add_argument("--feature-groups", default="original",
+                    help="Grupos separados por vírgula: original, era5_basin, new_features, "
+                         "new_features_static, new_features_dynamic (ou 'all')")
     p3.add_argument("--ablation-group", default=None,
                     help="Tag opcional para agrupar experimentos de ablation no dashboard")
     _add_spatial_validation_args(p3)
@@ -157,7 +148,6 @@ def _dispatch(args: argparse.Namespace) -> None:
             augmentation_method=args.augmentation_method,
             synthetic_csv=args.synthetic_csv,
             feature_groups=args.feature_groups,
-            restrict_coverage=args.restrict_coverage,
             ablation_group=args.ablation_group,
             exp_name_override=args.exp_name,
         )
@@ -176,7 +166,6 @@ def _dispatch(args: argparse.Namespace) -> None:
             synthetic_csv=args.synthetic_csv,
             exp_name=args.exp_name,
             feature_groups=args.feature_groups,
-            restrict_coverage=args.restrict_coverage,
             ablation_group=args.ablation_group,
             validation_mode=args.validation_mode,
             spatial_n_folds=args.spatial_n_folds,
@@ -202,7 +191,6 @@ def _dispatch(args: argparse.Namespace) -> None:
             aggregate_only=args.aggregate_only,
             list_clusters=args.list_clusters,
             feature_groups=args.feature_groups,
-            restrict_coverage=args.restrict_coverage,
             ablation_group=args.ablation_group,
             validation_mode=args.validation_mode,
             spatial_n_folds=args.spatial_n_folds,

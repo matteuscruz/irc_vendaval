@@ -2,7 +2,7 @@
 """Matriz de ablation: cluster_lstm em 4 combinações de dados/features.
 
 Mesma matriz de scripts/run_ablation.py (original / +sintético / +features
-novas / tudo junto), mas para o pipeline LSTM dual-head. cluster_lstm é
+novas / tudo junto), mas para o pipeline LSTM (schema v2). cluster_lstm é
 YAML-driven — cada braço reusa a MESMA config base, sobrepondo
 feature_groups/ablation_group/exp_name via parâmetros de run() (mesmo padrão
 já usado para --augmentation-method), sem precisar de 4 arquivos YAML.

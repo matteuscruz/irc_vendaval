@@ -54,8 +54,6 @@ REMOTE_DATASET_DIR = "/dataset"
 DATASET_SENTINELS = [
     "raw/INMET_Stratified.nc",
     "raw/ERA5_Stratified.nc",
-    "raw/dados_era5_parana_18utc",
-    "raw/dados_temperatura_brilho_BT55",
     "raw/ERA5_Features_Basin_2000_2026.nc",
 ]
 
@@ -83,10 +81,6 @@ image = (
         "netCDF4>=1.6.0",
         "geopandas>=0.14.0",
         "pyshp>=2.3.0",
-        # BT55: leitura de parquets mensais
-        "pyarrow>=14.0.0",
-        # ERA5-18UTC: xarray usa dask internamente
-        "dask>=2024.1.0",
     )
     .env({"MPLBACKEND": "Agg", "PYTHONUNBUFFERED": "1"})
     .add_local_file(
@@ -131,6 +125,33 @@ def _dataset_exists_in_volume() -> bool:
         return False
 
 
+def _sync_new_features(local_raw: Path) -> None:
+    """Sobe arquivos de dataset/raw/new_features ausentes (ou com tamanho
+    diferente) no volume — features novas entram sem re-enviar o dataset
+    inteiro. Caches locais (`_*`) não sobem."""
+    local_root = local_raw / "new_features"
+    if not local_root.is_dir():
+        return
+    try:
+        remote = {
+            e.path.lstrip("/"): e.size
+            for e in dataset_volume.listdir("/raw/new_features", recursive=True)
+        }
+    except Exception:
+        remote = {}
+    pending = [
+        f for f in sorted(local_root.rglob("*.nc"))
+        if not f.name.startswith("_")
+        and remote.get(f"raw/{f.relative_to(local_raw).as_posix()}") != f.stat().st_size
+    ]
+    if not pending:
+        return
+    print(f"Enviando {len(pending)} arquivo(s) novo(s) de new_features para o volume...")
+    with dataset_volume.batch_upload(force=True) as upload:
+        for f in pending:
+            upload.put_file(str(f), f"/raw/{f.relative_to(local_raw).as_posix()}")
+
+
 def _ensure_dataset(force: bool = False) -> None:
     local_raw = _local_root / "dataset" / "raw"
     local_shp = _local_root / "dataset" / "shp"
@@ -147,6 +168,7 @@ def _ensure_dataset(force: bool = False) -> None:
             f"Dataset já disponível no volume "
             f"'{DATASET_VOLUME_NAME}' — pulando upload."
         )
+        _sync_new_features(local_raw)
         return
 
     action = "Re-enviando" if force else "Enviando"

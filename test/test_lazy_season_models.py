@@ -19,7 +19,6 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 
 
@@ -71,12 +70,10 @@ class _ConstantModel:
 
 def _fake_artifact(cid: int, season: str | None, value: float) -> dict:
     x_fit = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
-    imputer = SimpleImputer(strategy="mean").fit(x_fit)
-    scaler = RobustScaler().fit(imputer.transform(x_fit))
+    scaler = RobustScaler().fit(x_fit)
     return {
         "model": _ConstantModel(value),
         "model_name": "Constant",
-        "imputer": imputer,
         "scaler": scaler,
         "features": ["x"],
         "cluster_id": cid,

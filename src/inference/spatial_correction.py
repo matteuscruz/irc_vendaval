@@ -21,6 +21,7 @@ Ou via pipeline Modal (chamado automaticamente após o treinamento).
 """
 from __future__ import annotations
 
+import json
 import warnings
 from pathlib import Path
 from typing import Any
@@ -33,11 +34,12 @@ from scipy.ndimage import gaussian_filter
 
 from src.data.netcdf_loader import NetCDFLoader
 from src.data.cluster_assigner import assign_station_clusters
-from src.data.climatology import get_climatology
+from src.data.climatology import get_harmonic_climatology
 from src.pipelines.common import (
-    BASE_FEATURES, TARGET_VAR, ERA5_GUST_PROXY, TRAIN_SLICE, VAL_SLICE, TEST_SLICE,
-    build_flat_dataframe, RANDOM_STATE, month_to_season,
+    TARGET_VAR, ERA5_GUST_PROXY, build_flat_dataframe, month_to_season,
+    reject_inmet_derived_features,
 )
+from src.pipeline.data.splits import MonthBlockSplit
 
 warnings.filterwarnings("ignore")
 
@@ -160,6 +162,7 @@ class SpatialCorrector:
             except Exception as e:
                 print(f"  ✗ {jf.name}: falha ao carregar ({e}) — pulando cluster.")
                 continue
+            reject_inmet_derived_features(artifact["features"], source=jf.name)
             cid = artifact["cluster_id"]
             # artifacts salvos antes do suporte a season (mlp/lstm, e lazy
             # pré-fix) não têm a chave — .get() já retorna None (pooled).
@@ -195,8 +198,16 @@ class SpatialCorrector:
         print("[SpatialCorrector] Atribuindo clusters...")
         station_clusters = assign_station_clusters(ds_inmet, self.shp_dir)
 
-        print("[SpatialCorrector] Calculando climatologia...")
-        ds_clim = get_climatology(ds_inmet, TARGET_VAR, slice(*TRAIN_SLICE))
+        # Climatologia reproduzida como no treino: harmônica, ajustada nos dias
+        # rotulados "train" pela partição salva no artefato. Usar outra
+        # definição aqui poria o modelo fora da distribuição de treino sem que
+        # nada acusasse (ver src/inference/grid_direct_predict.py).
+        split = self._training_split()
+        times = pd.DatetimeIndex(ds_era5["time"].values)
+        print("[SpatialCorrector] Climatologia ERA5 harmônica (dias de treino do split salvo)...")
+        ds_clim = get_harmonic_climatology(
+            ds_era5, ERA5_GUST_PROXY, times[split.label(times) == "train"],
+        ).reset_coords(drop=True)
 
         print("[SpatialCorrector] Construindo DataFrame flat...")
         self.df_all = build_flat_dataframe(
@@ -213,25 +224,30 @@ class SpatialCorrector:
         ds_inmet.close()
         ds_era5.close()
 
-        # gust_P50: mesma feature climatológica por estação que cluster_lazy.py
-        # usa no treino (mediana do alvo em TRAIN_SLICE, com fallback pra
-        # mediana do cluster) — sem isso, um modelo lazy vencedor ficava com
-        # essa feature sempre NaN aqui (imputada pela média de treino do
-        # imputer, silenciosamente degradando a predição).
-        train_mask = (
-            (self.df_all["time"] >= TRAIN_SLICE[0])
-            & (self.df_all["time"] <= TRAIN_SLICE[1])
-        )
-        df_train = self.df_all[train_mask]
-        gust_p50_station = df_train.groupby("estacao")[TARGET_VAR].median()
-        gust_p50_cluster = df_train.groupby("cluster_id")[TARGET_VAR].median()
-        self.df_all["gust_P50"] = self.df_all["estacao"].map(gust_p50_station)
-        na_mask = self.df_all["gust_P50"].isna()
-        if na_mask.any():
-            self.df_all.loc[na_mask, "gust_P50"] = (
-                self.df_all.loc[na_mask, "cluster_id"].map(gust_p50_cluster)
-            )
         print(f"  Shape: {self.df_all.shape}")
+
+    def _training_split(self) -> MonthBlockSplit:
+        """Partição de treino registrada nos artefatos carregados.
+
+        Todos os modelos de uma mesma run compartilham a partição; divergência
+        entre eles significa artefatos de runs diferentes misturados no mesmo
+        diretório, o que produziria climatologias incoerentes entre clusters.
+        """
+        specs = {
+            json.dumps(art["split"], sort_keys=True)
+            for art in self.cluster_models.values() if art.get("split")
+        }
+        if not specs:
+            raise ValueError(
+                "nenhum artefato registra a partição de treino ('split') — "
+                "retreine com a pipeline atual (blocos de mês)"
+            )
+        if len(specs) > 1:
+            raise ValueError(
+                f"{len(specs)} partições de treino diferentes entre os modelos de "
+                f"{self.models_dir} — misturar runs produz climatologia incoerente"
+            )
+        return MonthBlockSplit.from_dict(json.loads(specs.pop()))
 
     # ── Step 2: Predict at stations ──────────────────────────────────────
 
@@ -285,23 +301,20 @@ class SpatialCorrector:
         """Aplica um modelo (cluster, season) às linhas selecionadas por `mask`,
         escrevendo o resultado em `df_slice["rajada_corrigida"]` in-place."""
         features = artifact["features"]
-        imputer = artifact["imputer"]
         scaler = artifact["scaler"]
         model = artifact["model"]
 
-        # Extrair features (mesma lista usada no treino)
-        available = [f for f in features if f in df_slice.columns]
-        if len(available) < len(features):
-            missing = set(features) - set(available)
-            print(f"  ⚠ Cluster {cid}: {len(missing)} features ausentes, preenchendo com NaN")
-            for f in missing:
-                df_slice[f] = np.nan
+        missing = [f for f in features if f not in df_slice.columns]
+        if missing:
+            print(f"  ⚠ Cluster {cid}: {len(missing)} features ausentes {missing[:5]} — sem predição (nada é imputado)")
+            return
 
+        # Sem imputação: linha com qualquer feature ausente fica sem predição.
+        mask = mask & df_slice[features].notna().all(axis=1)
+        if not mask.any():
+            return
         x = df_slice.loc[mask, features]
-
-        # Aplicar mesma pipeline de pré-processamento do treino
-        x_imp = imputer.transform(x)
-        x_scaled = scaler.transform(x_imp)
+        x_scaled = scaler.transform(x)
 
         # Modelos treinados com Pandas (LazyPredict/Scikit-Learn) podem requerer
         # nomes de colunas explícitos se usaram pipelines ou ColumnTransformer

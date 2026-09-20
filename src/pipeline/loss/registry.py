@@ -44,34 +44,6 @@ def _pinball(tau: float):
     return loss
 
 
-@_register("robust_extreme_loss")
-def _robust_extreme_loss(
-    extreme_weight: float = 20.0,
-    extreme_threshold: float = 1.5,
-):
-    """Log-cosh com peso extreme_weight× para amostras acima do limiar."""
-    import tensorflow as tf
-    import tensorflow.keras.backend as K
-
-    def loss(y_true, y_pred):
-        error = tf.cast(y_true, tf.float32) - tf.cast(y_pred, tf.float32)
-        logcosh = tf.math.log(tf.math.cosh(error + 1e-12))
-        weights = tf.where(
-            tf.cast(y_true, tf.float32) > extreme_threshold,
-            tf.constant(extreme_weight, dtype=tf.float32),
-            tf.constant(1.0, dtype=tf.float32),
-        )
-        return K.mean(logcosh * weights)
-
-    loss.__name__ = f"robust_extreme_loss_w{extreme_weight}"
-    return loss
-
-
-@_register("dual_head")
-def _dual_head() -> None:
-    return None
-
-
 @_register("combined")
 def _combined(components: list[dict]) -> Callable:
     fns_weights = []

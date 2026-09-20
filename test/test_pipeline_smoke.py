@@ -80,54 +80,88 @@ def test_cluster_gan_smoke(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp
     assert "cluster_id" in synthetic.columns
 
 
-def _lstm_smoke_config(output_dir: Path, raw_dir: Path, shp_dir: Path, augmentation: dict) -> dict:
+def _lstm_smoke_config(
+    output_dir: Path, raw_dir: Path, shp_dir: Path, augmentation: dict,
+    resolution: str = "daily",
+) -> dict:
+    """Config LSTM v2 mínima — dados diários contínuos (synthetic_daily_raw_dir);
+    o fixture mensal zeraria as janelas depois da purga por bloco de mês."""
     return {
-        "version": 1,
-        "experiment": {
-            "name": "smoke",
-            "seed": 42,
-            "output_dir": str(output_dir),
-        },
+        "version": 2,
+        "experiment": {"name": "smoke", "seed": 42, "output_dir": str(output_dir)},
         "data": {
             "raw_dir": str(raw_dir),
             "shp_dir": str(shp_dir),
             "target_var": "daily_wind_gust_max",
-            "train_slice": ["2008-01-01", "2018-12-31"],
-            "val_slice": ["2019-01-01", "2019-12-31"],
-            "test_slice": ["2020-01-01", "2025-12-31"],
-            "test_station_fraction": 0.2,
+            "resolution": resolution,
             "feature_groups": "original",
+            "interp_method": "nearest",
+            "split": {"scheme": "month_block", "test_months": [1, 4, 7, 10],
+                      "val_fraction": 0.25, "purge": "strict"},
+            "climatology": {"method": "harmonic", "n_harmonics": 3},
+            "hourly": {"file": "test_cluster_3_hourly.nc", "day_offset_hours": 0},
         },
         "preprocessing": {"lookback": 3},
         "model": {
-            "name": "cluster_dual_head_lstm",
-            "params": {"units": 8, "dropout": 0.1, "l2_reg": 0.01, "learning_rate": 0.01},
+            "name": "cluster_lstm",
+            "params": {"units": 8, "dropout": 0.1, "huber_delta": 1.0, "learning_rate": 0.01},
         },
-        "training": {"epochs": 2, "batch_size": 8, "patience": 1, "min_samples": 2},
+        "training": {"epochs": 2, "batch_size": 64, "patience": 1, "min_samples": 2},
         "augmentation": augmentation,
         "visualization": {"enabled": False},
     }
 
 
-def test_cluster_lstm_smoke(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
+def _assert_lstm_v2_artifacts(output_dir: Path, resolution: str, lookback: int) -> None:
+    from src.inference.dl_metadata import load_dl_metadata
+
+    results_path = output_dir / "smoke" / "_partial" / "csv" / "results.csv"
+    assert results_path.exists(), f"results.csv não foi gerado em {results_path}"
+    assert not pd.read_csv(results_path).empty
+
+    meta_paths = list(output_dir.rglob("dl_metadata.joblib"))
+    assert len(meta_paths) == 1
+    meta = load_dl_metadata(meta_paths[0].parent, require_resolution=resolution)
+    assert meta["lookback"] == lookback and meta["target_kind"] == "absolute"
+    assert list(meta_paths[0].parent.glob("best_model_c*.keras"))
+
+    preds = pd.read_csv(next(output_dir.rglob("predictions_by_station.csv")), parse_dates=["time"])
+    assert set(preds["time"].dt.month) <= {1, 4, 7, 10}
+    assert preds["y_pred"].between(0, 80).all()
+
+
+def test_cluster_lstm_smoke(synthetic_daily_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
     from src.pipelines import cluster_lstm
 
     output_dir = tmp_path / "lstm_experiments"
     config = _lstm_smoke_config(
-        output_dir, synthetic_raw_dir, synthetic_shp_dir, {"method": "none"}
+        output_dir, synthetic_daily_raw_dir, synthetic_shp_dir, {"method": "none"}
     )
     config_path = tmp_path / "smoke_lstm.yaml"
     config_path.write_text(yaml.dump(config))
 
     cluster_lstm.run(config=str(config_path))
 
-    results_path = output_dir / "smoke" / "_partial" / "csv" / "results.csv"
-    assert results_path.exists(), f"results.csv não foi gerado em {results_path}"
-    results = pd.read_csv(results_path)
-    assert not results.empty
+    _assert_lstm_v2_artifacts(output_dir, "daily", 3)
 
 
-def test_cluster_lstm_smoke_extreme_gan(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
+def test_cluster_lstm_smoke_hourly(synthetic_hourly_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
+    from src.pipelines import cluster_lstm
+
+    output_dir = tmp_path / "lstm_experiments_hourly"
+    config = _lstm_smoke_config(
+        output_dir, synthetic_hourly_raw_dir, synthetic_shp_dir, {"method": "none"},
+        resolution="hourly",
+    )
+    config_path = tmp_path / "smoke_lstm_hourly.yaml"
+    config_path.write_text(yaml.dump(config))
+
+    cluster_lstm.run(config=str(config_path))
+
+    _assert_lstm_v2_artifacts(output_dir, "hourly", 24)
+
+
+def test_cluster_lstm_smoke_extreme_gan(synthetic_daily_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
     """Fase 1 do plano de melhorias do GAN: ExGANAugmenter (gera X+y juntos,
     sem nearest-neighbor pós-hoc) acionado via augmentation.method do YAML,
     caminho até agora nunca exercitado pelo ablation do LSTM."""
@@ -135,7 +169,7 @@ def test_cluster_lstm_smoke_extreme_gan(synthetic_raw_dir: Path, synthetic_shp_d
 
     output_dir = tmp_path / "lstm_experiments_extreme_gan"
     config = _lstm_smoke_config(
-        output_dir, synthetic_raw_dir, synthetic_shp_dir,
+        output_dir, synthetic_daily_raw_dir, synthetic_shp_dir,
         {
             "method": "extreme_gan",
             "extreme_percentile": 90.0,
@@ -157,14 +191,14 @@ def test_cluster_lstm_smoke_extreme_gan(synthetic_raw_dir: Path, synthetic_shp_d
     assert not results.empty
 
 
-def test_cluster_lstm_smoke_extreme_diffusion(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
+def test_cluster_lstm_smoke_extreme_diffusion(synthetic_daily_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
     """Fase 1 do plano de melhorias do GAN: ExtremeDiffusionAugmenter (DDPM+CFG,
     gera X+y juntos) acionado via augmentation.method do YAML."""
     from src.pipelines import cluster_lstm
 
     output_dir = tmp_path / "lstm_experiments_extreme_diffusion"
     config = _lstm_smoke_config(
-        output_dir, synthetic_raw_dir, synthetic_shp_dir,
+        output_dir, synthetic_daily_raw_dir, synthetic_shp_dir,
         {
             "method": "extreme_diffusion",
             "extreme_percentile": 90.0,

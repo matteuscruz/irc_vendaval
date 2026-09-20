@@ -10,9 +10,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
 from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.preprocessing import RobustScaler
+
+from src.data.new_features import (  # noqa: F401 (reexportado)
+    KNOWN_STATIC_FEATURES, NEW_FEATURE_PREFIX,
+)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -66,11 +69,6 @@ ORIGINAL_FEATURES = [
     # Localização da estação
     "latitude",
     "longitude",
-    # Conectividade temporal — observação INMET autoregressiva
-    "lag1_gust_obs",
-    "lag2_gust_obs",
-    "lag3_gust_obs",
-    "rolling7d_gust_obs",
     # Anomalia sinótica ERA5
     "wind_mag_max_anom",
     "rolling3d_wind_mag_max",
@@ -89,28 +87,25 @@ ORIGINAL_FEATURES = [
     "tp_roll3_basin",
 ]
 
-# ── ERA5 18UTC — snapshot pré-convectivo (Paraná; NaN fora da cobertura) ──
-ERA5_18Z_FEATURES = [
-    "cape_18z",                  # CAPE — energia convectiva disponível
-    "msl_18z",                   # Pressão ao nível do mar 18UTC
-    "wind10m_mag_18z",           # Magnitude vento 10m 18UTC
-    "wind100m_mag_18z",          # Magnitude vento 100m 18UTC
-    "wind_shear_sfc_18z",        # Cisalhamento 10m→100m
-    "wind_shear_850_300_18z",    # Cisalhamento vertical 850→300 hPa
-    "wind_shear_850_500_18z",    # Cisalhamento vertical 850→500 hPa
-    "thickness_1000_500_18z",    # Espessura 1000-500 hPa (temp. média camada)
-    "lapse_rate_850_500_18z",    # Lapse rate 850-500 hPa (instabilidade)
-    "q850_18z",                  # Umidade específica 850 hPa
-    "mslp_tendency_18z",         # Tendência pressão nível do mar 18UTC
-]
+# Nenhuma feature pode depender da observação INMET (lags do alvo, mediana
+# por estação, climatologia observada): o modelo corrige o ERA5 na grade
+# inteira, onde não existe estação medindo. INMET entra só como ALVO.
+# Nomes usados por versões anteriores — a inferência recusa artefatos que os
+# tenham como entrada (ver `reject_inmet_derived_features`).
+INMET_DERIVED_FEATURES = (
+    "lag1_gust_obs", "lag2_gust_obs", "lag3_gust_obs", "rolling7d_gust_obs",
+    "gust_P50",
+)
 
-# ── BT55 — temperatura de brilho ≤ 55°C (convecção profunda, Paraná) ──
-BT55_FEATURES = [
-    "bt55_flag",                 # Flag binário convecção profunda
-    "bt55_rolling3d",            # Convecção recente (rolling 3 dias)
-    "bt55_rolling7d",            # Tendência convectiva (rolling 7 dias)
-    "bt55_frac_month",           # Fração mensal convecção (rolling 30 dias)
-]
+
+def reject_inmet_derived_features(features, source: str = "") -> None:
+    found = [f for f in features if f in INMET_DERIVED_FEATURES]
+    if found:
+        where = f" ({source})" if source else ""
+        raise ValueError(
+            f"Modelo{where} usa features derivadas do INMET {found}, que não "
+            "existem na grade ERA5 — retreine com o conjunto de features atual."
+        )
 
 # ── ERA5 Basin — grade regional pré-agregada (Sul/Sudeste, NaN fora da bacia) ──
 # As 12 features abaixo JÁ estão em ORIGINAL_FEATURES (sob os nomes antigos
@@ -134,72 +129,121 @@ ERA5_BASIN_FEATURES = [
     "tp_sum_basin",         # Precipitação total diária (== total_precipitation)
 ]
 
-BASE_FEATURES = ORIGINAL_FEATURES + ERA5_18Z_FEATURES + BT55_FEATURES + ERA5_BASIN_FEATURES
+BASE_FEATURES = ORIGINAL_FEATURES + ERA5_BASIN_FEATURES
+
+# ── Features ERA5 novas (dataset/raw/new_features) ─────────────────────────
+# Descobertas em runtime por src/data/new_features.py — os nomes dependem dos
+# arquivos presentes, então o grupo é resolvido a partir das colunas do
+# DataFrame (prefixo `nf_`), não de uma lista fixa. `new_features_static` e
+# `new_features_dynamic` recortam esse mesmo conjunto por KNOWN_STATIC_FEATURES
+# (relevo/superfície vs. variáveis horárias agregadas por dia) — úteis para
+# testar um subconjunto sem misturar sinal de fontes muito diferentes.
+NEW_FEATURES_GROUP = "new_features"
+NEW_FEATURES_STATIC_GROUP = "new_features_static"
+NEW_FEATURES_DYNAMIC_GROUP = "new_features_dynamic"
+NEW_FEATURES_TOKENS = (NEW_FEATURES_GROUP, NEW_FEATURES_STATIC_GROUP, NEW_FEATURES_DYNAMIC_GROUP)
 
 # ── Grupos de features (ablation) ───────────────────────────────────────────
 
 FEATURE_GROUPS: dict[str, list[str]] = {
     "original": ORIGINAL_FEATURES,
-    "era5_18z": ERA5_18Z_FEATURES,
-    "bt55": BT55_FEATURES,
     "era5_basin": ERA5_BASIN_FEATURES,
 }
+VALID_GROUPS = sorted([*FEATURE_GROUPS, *NEW_FEATURES_TOKENS])
+DEFAULT_FEATURE_GROUPS = "original"
 
 
-def resolve_feature_groups(spec: str | None) -> list[str]:
-    """Resolve um spec textual ("original,era5_18z,bt55") em uma lista de
-    features, preservando a ordem canônica de BASE_FEATURES independente da
-    ordem do spec. spec=None ou "all" retorna BASE_FEATURES completo.
-    """
-    if not spec or spec.strip().lower() == "all":
-        return list(BASE_FEATURES)
-
+def _group_tokens(spec: str | None) -> list[str]:
+    if not spec:
+        return [DEFAULT_FEATURE_GROUPS]
     tokens = [t.strip().lower() for t in spec.split(",") if t.strip()]
-    invalid = [t for t in tokens if t not in FEATURE_GROUPS]
+    if tokens == ["all"]:
+        return VALID_GROUPS
+    invalid = [t for t in tokens if t not in VALID_GROUPS]
     if invalid:
         raise ValueError(
             f"Grupo(s) de features inválido(s): {invalid}. "
-            f"Válidos: {sorted(FEATURE_GROUPS)} (ou 'all')."
+            f"Válidos: {VALID_GROUPS} (ou 'all')."
         )
-
-    selected = {f for t in tokens for f in FEATURE_GROUPS[t]}
-    return [f for f in BASE_FEATURES if f in selected]
+    return tokens
 
 
-def restrict_to_feature_coverage(df: pd.DataFrame, feature_groups: str | None) -> pd.DataFrame:
-    """Restringe `df` às estações com cobertura REAL (não-NaN) das features
-    era5_18z/bt55 pedidas em `feature_groups` — em vez de manter as 243
-    estações com essas colunas imputadas/NaN pra ~197 delas.
+def uses_new_features(spec: str | None) -> bool:
+    return bool(set(NEW_FEATURES_TOKENS) & set(_group_tokens(spec)))
 
-    era5_18z é regional (só Paraná, ~46/243 estações reais); bt55 cobre
-    ~57/243. Sem essa restrição, o braço de ablation "newfeatures" mede o
-    efeito das features novas diluído por ~80% de estações onde elas nunca
-    tiveram dado de verdade — pior teste do que testar só onde a feature
-    existe. Não afeta 'original'/'era5_basin' (cobertura ampla, 236/243) nem
-    arms que não pedem era5_18z/bt55 (retorna df sem alteração).
+
+def resolve_feature_groups(spec: str | None, columns=None) -> list[str]:
+    """Resolve um spec textual ("original,new_features") em lista de features,
+    na ordem canônica (BASE_FEATURES, depois as `nf_*` em ordem alfabética).
+    spec=None → "original"; "all" → todos os grupos.
+
+    Os grupos `new_features`/`new_features_static`/`new_features_dynamic`
+    precisam de `columns` (as colunas do DataFrame já montado): sem elas, ou
+    sem nenhuma coluna `nf_*` correspondente, é erro — nunca vira um conjunto
+    vazio em silêncio.
     """
-    if not feature_groups:
-        return df
-    tokens = {t.strip().lower() for t in feature_groups.split(",") if t.strip()}
-    cols = []
-    if "era5_18z" in tokens:
-        cols += ERA5_18Z_FEATURES
-    if "bt55" in tokens:
-        cols += BT55_FEATURES
-    cols = [c for c in cols if c in df.columns]
-    if not cols:
-        return df
+    tokens = _group_tokens(spec)
+    selected = {f for t in tokens if t in FEATURE_GROUPS for f in FEATURE_GROUPS[t]}
+    features = [f for f in BASE_FEATURES if f in selected]
+    nf_tokens = set(NEW_FEATURES_TOKENS) & set(tokens)
+    if nf_tokens:
+        if columns is None:
+            raise ValueError(f"o(s) grupo(s) {sorted(nf_tokens)} são resolvidos a partir das colunas do DataFrame")
+        all_nf = {c for c in columns if str(c).startswith(NEW_FEATURE_PREFIX)}
+        chosen = set()
+        if NEW_FEATURES_GROUP in nf_tokens:
+            chosen |= all_nf
+        if NEW_FEATURES_STATIC_GROUP in nf_tokens:
+            chosen |= all_nf & KNOWN_STATIC_FEATURES
+        if NEW_FEATURES_DYNAMIC_GROUP in nf_tokens:
+            chosen |= all_nf - KNOWN_STATIC_FEATURES
+        if not chosen:
+            raise ValueError(
+                f"grupo(s) {sorted(nf_tokens)} pedido(s), mas nenhuma feature correspondente foi "
+                "carregada (confira dataset/raw/new_features/<região>/{sl,pl,static})"
+            )
+        features += sorted(chosen)
+    return features
 
-    covered = df.groupby("estacao")[cols].apply(lambda g: bool(g.notna().all().all()))
-    covered_stations = covered[covered].index
-    n_before = df["estacao"].nunique()
-    out = df[df["estacao"].isin(covered_stations)]
-    print(
-        f"[restrict_to_feature_coverage] {len(covered_stations)}/{n_before} "
-        f"estações com cobertura real de {tokens & {'era5_18z', 'bt55'}} — "
-        "demais descartadas (evita diluir o teste com NaN/imputação)."
-    )
-    return out
+
+def select_complete_rows(df: pd.DataFrame, features: list[str], label: str = "") -> pd.DataFrame:
+    """Regra única de dados das pipelines: só ERA5, nada imputado.
+
+    1. Toda feature pedida precisa existir como coluna (erro se faltar).
+    2. Com features novas (`nf_*`) ativas, só entram os clusters com TODAS as
+       estações dentro da cobertura espacial delas — cluster parcialmente
+       coberto sai inteiro.
+    3. Linhas com NaN em qualquer feature ativa são descartadas (bordas de
+       lag/rolling, estação fora da máscara da bacia, dia fora do período da
+       feature nova).
+    """
+    tag = f"[{label}] " if label else ""
+    missing = [f for f in features if f not in df.columns]
+    if missing:
+        raise ValueError(f"{tag}features ausentes no DataFrame: {missing}")
+
+    nf = [f for f in features if f.startswith(NEW_FEATURE_PREFIX)]
+    if nf:
+        covered = df.groupby("estacao")[nf].apply(lambda g: bool(g.notna().any().all()))
+        by_cluster = df[["estacao", "cluster_id"]].drop_duplicates().assign(
+            covered=lambda d: d["estacao"].map(covered)
+        ).groupby("cluster_id")["covered"].all()
+        keep = by_cluster[by_cluster].index
+        dropped = sorted(map(str, by_cluster[~by_cluster].index))
+        print(
+            f"{tag}Cobertura das features novas: clusters mantidos "
+            f"{sorted(map(str, keep))}; descartados (não 100% cobertos): {dropped}"
+        )
+        df = df[df["cluster_id"].isin(keep)]
+        if df.empty:
+            raise ValueError(f"{tag}nenhum cluster 100% coberto pelas features novas")
+
+    complete = df[features].notna().all(axis=1)
+    n_drop = int((~complete).sum())
+    if n_drop:
+        print(f"{tag}{n_drop}/{len(df)} linhas com feature ausente descartadas (sem imputação)")
+    return df[complete]
+
 
 # A partir de 2025-08, INMET_Stratified.nc passou a vir de
 # Training_Dataset_INMET_ERA5_Paired.csv (271 estações na bacia, real desde
@@ -251,12 +295,20 @@ def build_flat_dataframe(
     2000-2006, quando pouquíssimas estações estavam ativas), impedindo a
     extrapolação para justamente os anos sem dado real — o objetivo central
     da correção."""
-    df_feat = ds_era5.to_dataframe().reset_index()
-    df_targ = ds_inmet[[TARGET_VAR]].to_dataframe().reset_index()
+    # latitude/longitude são coordenada da ESTAÇÃO nos dois datasets; vindo
+    # dos dois lados o merge as renomeava para latitude_x/_y e a feature
+    # sumia. Fonte única: a tabela de estações do INMET.
+    station_ll = ["latitude", "longitude"]
+    df_feat = ds_era5.to_dataframe().reset_index().drop(columns=station_ll, errors="ignore")
+    df_targ = ds_inmet[[TARGET_VAR]].reset_coords(drop=True).to_dataframe().reset_index()
 
     df = pd.merge(
         df_feat, df_targ, on=["time", "estacao"],
         how="inner", validate="one_to_one",
+    )
+    df = pd.merge(
+        df, ds_inmet[station_ll].to_dataframe().reset_index(), on="estacao",
+        how="left", validate="many_to_one",
     )
     if require_target:
         df = df.dropna(subset=[TARGET_VAR])
@@ -266,7 +318,7 @@ def build_flat_dataframe(
     df["day_cos"] = np.cos(2 * np.pi * doy / 365.25)
     df["dayofyear"] = doy
 
-    df_clim_pd = ds_clim.to_dataframe(name="era5_clim_wind").reset_index()
+    df_clim_pd = ds_clim.reset_coords(drop=True).to_dataframe(name="era5_clim_wind").reset_index()
     df = pd.merge(
         df, df_clim_pd, on=["dayofyear", "estacao"],
         how="left", validate="many_to_one",
@@ -280,15 +332,6 @@ def build_flat_dataframe(
 
     df = df.sort_values(["estacao", "time"]).reset_index(drop=True)
 
-    # Lags autoregressivos da observação INMET — causal (shift dentro de cada estação)
-    for _lag in [1, 2, 3]:
-        df[f"lag{_lag}_gust_obs"] = df.groupby("estacao")[TARGET_VAR].shift(_lag)
-    # Rolling 7d da observação: shift(1) antes do rolling evita incluir o dia atual
-    df["rolling7d_gust_obs"] = (
-        df.groupby("estacao")[TARGET_VAR]
-        .transform(lambda s: s.shift(1).rolling(7, min_periods=3).mean())
-    )
-
     # Sazonalidade mensal cíclica — complementa day_sin/cos para diferenças inter-mensais
     _month = df["time"].dt.month
     df["month_sin"] = np.sin(2 * np.pi * _month / 12)
@@ -300,8 +343,73 @@ def build_flat_dataframe(
 # ── Splits temporais ──────────────────────────────────────────────────────────
 
 def make_split(df: pd.DataFrame, time_range: tuple[str, str]) -> pd.DataFrame:
+    """Recorte por intervalo de datas. Usado pelo `cluster_gan`, que mantém o
+    split por blocos de ano; lazy/mlp usam blocos de mês (`SPLIT_COL`)."""
     mask = (df["time"] >= time_range[0]) & (df["time"] <= time_range[1])
     return df[mask].copy()
+
+
+# ── Split por blocos de mês (lazy, mlp e LSTM) ────────────────────────────────
+# Coluna com o rótulo de split de cada linha, escrita uma única vez pelo loader
+# de cada pipeline tabular. O rótulo viaja com o dado em vez de ser recalculado
+# por cluster: `resolve_month_block_split` sorteia os blocos de validação sobre
+# os ANOS presentes, então recalcular sobre um subconjunto (um cluster, um fold)
+# devolveria uma partição diferente da usada no ajuste da climatologia.
+SPLIT_COL = "_split"
+
+
+def default_month_block_split(times, seed: int = RANDOM_STATE):
+    """Partição padrão por blocos de mês: teste = Jan/Abr/Jul/Out de todos os
+    anos (um mês por trimestre climático), validação = blocos (ano, mês)
+    sorteados dentro dos meses de treino, estratificados por mês."""
+    from src.pipeline.data.splits import resolve_month_block_split
+
+    return resolve_month_block_split(times, seed=seed)
+
+
+def assign_split_labels(df: pd.DataFrame, split=None, seed: int = RANDOM_STATE):
+    """Escreve `SPLIT_COL` em `df` a partir de um `MonthBlockSplit`.
+
+    Retorna `(df, split)`. Sem `split`, resolve o padrão sobre os dias
+    presentes em `df["time"]`.
+    """
+    times = pd.DatetimeIndex(df["time"])
+    if split is None:
+        split = default_month_block_split(np.unique(times.values), seed=seed)
+    df = df.copy()
+    df[SPLIT_COL] = split.label(times)
+    return df, split
+
+
+def split_part(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Linhas de um split ("train"/"val"/"test"). Exige `SPLIT_COL` — a
+    ausência é erro, não recálculo silencioso com outra partição."""
+    if SPLIT_COL not in df.columns:
+        raise ValueError(
+            f"coluna {SPLIT_COL!r} ausente: o DataFrame precisa vir de um loader "
+            "que aplique assign_split_labels()"
+        )
+    return df[df[SPLIT_COL] == label].copy()
+
+
+def split_spec_from_labels(
+    df: pd.DataFrame, test_months=(1, 4, 7, 10), seed: int = RANDOM_STATE,
+) -> dict:
+    """Especificação da partição a partir de `SPLIT_COL`, para o metadado do
+    experimento e para os artefatos.
+
+    Emite o schema CANÔNICO (`MonthBlockSplit.to_dict`), não um formato
+    próprio: a inferência e as ferramentas de XAI reconstroem a partição com
+    `MonthBlockSplit.from_dict`, e um segundo formato para a mesma coisa
+    tornaria o artefato ilegível justamente por quem precisa dele.
+    """
+    from src.pipeline.data.splits import MonthBlockSplit
+
+    val = df.loc[df[SPLIT_COL] == "val", "time"]
+    units = tuple(sorted({(int(t.year), int(t.month)) for t in pd.DatetimeIndex(val)}))
+    return MonthBlockSplit(
+        test_months=tuple(test_months), val_units=units, seed=seed,
+    ).to_dict()
 
 
 # ── Diretório de experimento ──────────────────────────────────────────────────
@@ -353,30 +461,36 @@ def apply_cluster_merge(
 
 # ── Pré-processamento (MLP/Lazy) ──────────────────────────────────────────────
 
+def drop_incomplete_synthetic(s: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    """Linhas sintéticas (CSV do GAN) sem alguma feature ativa — ex.: CSV
+    gerado antes das features novas existirem — são descartadas, não
+    imputadas."""
+    complete = s.reindex(columns=features).notna().all(axis=1)
+    if not complete.all():
+        print(f"   [AVISO] {int((~complete).sum())}/{len(s)} linhas sintéticas sem todas as "
+              "features ativas — descartadas (sem imputação)")
+    return s[complete]
+
+
+def assert_no_missing(x, label: str = "features") -> None:
+    """Sem imputação: NaN que chegue ao modelo é bug de montagem dos dados
+    (`select_complete_rows` deveria ter descartado a linha)."""
+    arr = np.asarray(x, dtype=float)
+    if not np.isfinite(arr).all():
+        bad = int((~np.isfinite(arr)).any(axis=1).sum()) if arr.ndim > 1 else int((~np.isfinite(arr)).sum())
+        raise ValueError(f"{bad} linha(s) com valor ausente/infinito em {label} — nada é imputado")
+
+
 def preprocess_df(
     x_train: pd.DataFrame, x_other: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """SimpleImputer + RobustScaler fitados apenas no treino; retorna DataFrames.
-
-    `keep_empty_features=True`: por padrão o SimpleImputer DESCARTA colunas
-    inteiramente NaN no treino (menos colunas na saída do que na entrada),
-    o que quebra a atribuição `columns=x_train.columns` logo abaixo (shape
-    mismatch) sempre que um subconjunto de linhas (ex.: um cluster pequeno,
-    ou um fold de station-holdout) deixa alguma feature 100% NaN — ex.:
-    features ERA5-18UTC/BT55 só cobrem a região do Paraná. Mantém a coluna
-    (preenchida com 0.0) em vez de descartá-la.
-    """
-    imputer = SimpleImputer(strategy="mean", keep_empty_features=True).fit(x_train)
-    scaler = RobustScaler().fit(imputer.transform(x_train))
-
-    x_tr = pd.DataFrame(
-        scaler.transform(imputer.transform(x_train)),
-        columns=x_train.columns,
-    )
-    x_ot = pd.DataFrame(
-        scaler.transform(imputer.transform(x_other)),
-        columns=x_other.columns,
-    )
+    """RobustScaler fitado apenas no treino; retorna DataFrames. Sem imputação:
+    NaN em qualquer lado é erro."""
+    assert_no_missing(x_train, "x_train")
+    assert_no_missing(x_other, "x_eval")
+    scaler = RobustScaler().fit(x_train)
+    x_tr = pd.DataFrame(scaler.transform(x_train), columns=x_train.columns)
+    x_ot = pd.DataFrame(scaler.transform(x_other), columns=x_other.columns)
     return x_tr, x_ot
 
 
