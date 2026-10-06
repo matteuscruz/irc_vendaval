@@ -35,7 +35,6 @@ def _lstm_smoke_config(output_dir: Path, raw_dir: Path, shp_dir: Path) -> dict:
             "params": {"units": 8, "dropout": 0.1, "huber_delta": 1.0, "learning_rate": 0.01},
         },
         "training": {"epochs": 2, "batch_size": 64, "patience": 1, "min_samples": 2},
-        "augmentation": {"method": "none"},
         "visualization": {"enabled": False},
     }
 

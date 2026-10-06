@@ -7,7 +7,7 @@ ORIGINAL_FEATURES reescrito via ERA5-Basin. As features novas
 Roda o merge caro (NetCDFLoader.load_extended(use_cache=False)) UMA vez e
 salva o resultado em dataset/raw/era5_merged_cache.nc. Depois disso, todo
 NetCDFLoader(...).load_extended() (padrão use_cache=True) carrega direto do
-cache em vez de recalcular — usado por GAN, LazyPredict, MLP e LSTM igualmente,
+cache em vez de recalcular — usado por LazyPredict, MLP e LSTM igualmente,
 garantindo que todos treinem sobre exatamente o mesmo dataset sincronizado.
 
 Uso:
@@ -64,7 +64,7 @@ def main() -> None:
     size_mb = cache_path.stat().st_size / 1024**2
     print(f"[build_synced_dataset] Cache salvo: {cache_path} ({size_mb:.1f} MB).")
     print(
-        "[build_synced_dataset] Pronto — GAN/LazyPredict/MLP/LSTM vão carregar "
+        "[build_synced_dataset] Pronto — LazyPredict/MLP/LSTM vão carregar "
         "esse cache automaticamente (load_extended() padrão). Lembre de subir "
         "pro volume Modal: modal run src/modal/cluster_lstm.py "
         "--only-upload-dataset --force-dataset-upload"

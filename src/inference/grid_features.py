@@ -13,7 +13,7 @@ coordenadas) — o INMET entra só como alvo no treino — então a célula tem
 exatamente o mesmo vetor de entrada que a estação teve.
 
 As features derivadas do ERA5 são construídas com o MESMO código canônico do
-treino (`rebuild_original_from_basin`, `get_climatology`) — que é aritmética
+treino (`rebuild_original_from_basin`) — que é aritmética
 xarray agnóstica a dimensões, e portanto vale igual para (time, estacao) e
 para (time, latitude, longitude). Isso é o que garante que a distribuição das
 features na grade bata com a que os modelos viram no treino.
@@ -27,10 +27,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from src.data.climatology import get_climatology
 from src.data.new_features import new_features_to_points
 from src.data.original_features_basin import rebuild_original_from_basin
-from src.pipelines.common import ERA5_GUST_PROXY, TRAIN_SLICE, month_to_season
+from src.pipelines.common import ERA5_GUST_PROXY, month_to_season
 
 ERA5_BASIN_FILE = "ERA5_Features_Basin_2000_2026.nc"
 
@@ -65,14 +64,9 @@ def load_grid_features(raw_dir: str | Path) -> xr.Dataset:
         month_cos=np.cos(2 * np.pi * month / 12),
     )
 
-    # Climatologia por dia-do-ano, POR CÉLULA, a partir do proxy ERA5. Hoje é
-    # só um preenchimento inicial da coluna: lazy/mlp e LSTM ajustam a
-    # climatologia por série HARMÔNICA nos dias de treino da sua partição, e
-    # `grid_direct_predict` sobrescreve esta coluna com aquela definição antes
-    # de predizer (é o que mantém a feature na distribuição de treino). Só o
-    # cluster_gan segue nesta versão por dia-do-ano.
-    clim = get_climatology(ds, ERA5_GUST_PROXY, slice(*TRAIN_SLICE))
-    ds = ds.assign(era5_clim_wind=clim.sel(dayofyear=doy).drop_vars("dayofyear"))
+    # `era5_clim_wind` NÃO é montada aqui: lazy/mlp e LSTM ajustam a climatologia
+    # por série HARMÔNICA nos dias de treino da sua partição, e `grid_direct_predict`
+    # a calcula por célula a partir do split gravado no artefato.
 
     # `latitude`/`longitude` já são features do modelo (no treino, as da
     # estação). Não precisam ser materializadas como variáveis: depois de

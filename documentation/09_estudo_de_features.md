@@ -16,6 +16,8 @@ COM e SEM cada feature. **Somente cluster 3** e **seeds fixas** (não são flags
 - **Variáveis:** 12 selecionadas na validação (58 colunas, `config/selected_features_val12.json`).
   O arm `sel__val12`, treinado no Modal, custa 0,002 m/s contra o completo e não supera o
   grupo 1 sozinho de forma relevante: a vantagem é parcimônia (ver "Seleção de variáveis").
+- **Partição:** blocos de mês (teste = jan/abr/jul/out de todos os anos; validação = blocos ano-mês
+  nos meses de treino; purga de 1 dia), ver "Partição treino / validação / teste".
 - **Onde ver:** `notebooks/README.md` (índice) e `notebooks/feature_study_grupos/atual/`.
 - **Histórico:** os desenhos anteriores (diário, diário+horário, RAW horário, eixo de perda e
   amostragem) foram removidos do código; ficam no histórico do git. Os resultados que geraram
@@ -219,6 +221,27 @@ features): `sel__val12` vs `full` (o que se perde ao cortar), `sel__val12_sem_an
 **Cuidados.** Rode com o perfil do Modal que **tem** o volume: em outro workspace o volume é
 recriado vazio e o erro aparece como `FileNotFoundError` de `arms.json`. A permutação divide o
 crédito entre colunas colineares e mede uso, não ganho fora da amostra.
+
+## Partição treino / validação / teste
+
+Partição por **blocos de mês** (`MonthBlockSplit`, a mesma de lazy, mlp e LSTM v2), calculada uma vez
+sobre o eixo de dias de 2000–2024 do alvo INMET e gravada na coluna `_split`:
+
+| split | definição | linhas (referência) |
+|---|---|---|
+| teste | meses 1, 4, 7 e 10 de todos os anos (um por trimestre) | 13.583 (97 blocos ano-mês) |
+| treino | meses 2, 3, 5, 6, 8, 9, 11, 12 | 22.827 |
+| validação | 32 blocos (ano, mês) sorteados nos meses de treino (15 %, estratificado por mês, seed 42) | 4.452 |
+
+- O **trimestre é confundido com o seu mês de teste** (DJF testa em janeiro, MAM em abril…), e o
+  intervalo por trimestre tem só 24–25 blocos; só o agregado (97 blocos) tem IC confiável.
+- A validação **escolhe** (top-5 de modelos, seleção de variáveis); o teste **pontua**. Nenhuma escolha
+  olha o teste. O eixo de dias vai até 2024: com 2025 os blocos de validação mudam (15 de 32) e o
+  estudo deixaria de ser comparável ao anterior.
+- A purga (seção seguinte) tira 1.030 linhas das fronteiras de mês.
+- Esta é a **única** partição do repositório. O split antigo por anos (treino 2000–2018 / validação
+  2019 / teste 2020–2025) e o `cluster_gan` que o usava saíram: o GAN foi extraído para o repositório
+  `irc_vendaval_gan`, e as constantes `TRAIN_SLICE`/`VAL_SLICE`/`TEST_SLICE` foram removidas.
 
 ## Purga temporal nas fronteiras de mês
 

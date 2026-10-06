@@ -77,8 +77,7 @@ class DLSpatialCorrector(SpatialCorrector):
 
         # Climatologia ERA5 (feature `era5_clim_wind`) reproduzida EXATAMENTE
         # como no treino: harmônica, ajustada nos dias rotulados "train" pelo
-        # split salvo no metadata (antes a inferência usava TRAIN_SLICE e o
-        # treino outro período — desalinhamento silencioso).
+        # split salvo no metadata.
         split = MonthBlockSplit.from_dict(self.metadata["split"])
         times = pd.DatetimeIndex(ds_era5["time"].values)
         n_harmonics = int(self.metadata.get("climatology", {}).get("n_harmonics", 3))

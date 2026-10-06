@@ -128,7 +128,7 @@ class NetCDFLoader:
         return ds_inmet, ds_era5_aligned
 
     # Cache do merge completo (caro: ~15min+ pras 243 estações) — gerado uma
-    # vez por scripts/build_synced_dataset.py, reaproveitado por GAN/Lazy/MLP/
+    # vez por scripts/build_synced_dataset.py, reaproveitado por Lazy/MLP/
     # LSTM em vez de cada um recalcular do zero. Vive dentro de dataset/raw/,
     # sobe pro volume Modal junto com o resto (não é sentinela — ausência não
     # bloqueia _ensure_dataset(), só faz load_extended() cair no caminho lento).

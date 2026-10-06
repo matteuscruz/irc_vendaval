@@ -2,7 +2,7 @@
 
 A LSTM dual-head anterior previa a RAZÃO rajada/ERA5 e reconstruía o valor
 absoluto multiplicando pelo proxy ERA5 do dia-alvo — reconstrução repetida em
-6+ lugares (trainer, métricas, plots, injeção sintética, inferência). O alvo
+6+ lugares (trainer, métricas, plots, inferência). O alvo
 agora é a própria rajada em m/s (escalonada só para o treino), e a única
 inversão válida é esta.
 """

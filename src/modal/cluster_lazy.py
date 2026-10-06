@@ -22,10 +22,6 @@ Uso
 # Rodar (recomenda-se --detach p/ sobreviver a quedas de conexão local)
 modal run --detach src/modal/cluster_lazy.py
 
-# Com augmentation
-modal run --detach src/modal/cluster_lazy.py \\
-    --synthetic-csv artifacts/gan_augment_modal/gan_augment/exp7/synthetic_augment.csv
-
 # Só baixar artefatos de uma run já concluída
 modal run src/modal/cluster_lazy.py --only-download \\
     --local-dir artifacts/lazy_modal
@@ -221,12 +217,12 @@ _VOLUMES = {
 )
 def build_dataset_cache(interp_method: str = "nearest") -> str:
     """Gera o cache do merge ERA5 completo (INMET × ERA5_Stratified ×
-    ERA5-Basin) UMA vez, no volume Modal — reaproveitado por GAN/Lazy/MLP/LSTM via
+    ERA5-Basin) UMA vez, no volume Modal — reaproveitado por Lazy/MLP/LSTM via
     NetCDFLoader.load_extended(), evitando recalcular o merge caro em cada
     uma das dezenas de invocações da matriz de ablation.
 
     `interp_method="bilinear"` (usado pela LSTM v2) grava um cache separado,
-    `era5_merged_cache_bilinear.nc` — o `nearest` de lazy/mlp/gan não muda.
+    `era5_merged_cache_bilinear.nc` — o `nearest` de lazy/mlp não muda.
     """
     dataset_volume.reload()
 
@@ -273,27 +269,8 @@ def build_dataset_cache(interp_method: str = "nearest") -> str:
     return str(cache_path)
 
 
-def _resolve_synth(synthetic_csv: str | None) -> str | None:
-    """Resolve o caminho do CSV sintético no volume de artefatos."""
-    if not synthetic_csv:
-        return None
-    path = (
-        synthetic_csv if synthetic_csv.startswith("/")
-        else f"{REMOTE_ARTIFACTS_DIR}/{synthetic_csv}"
-    )
-    if not Path(path).exists():
-        raise FileNotFoundError(
-            f"CSV sintético não encontrado no volume: {path}"
-        )
-    return path
-
-
 def _base_cmd(
     cluster_merge: str | None,
-    synth: str | None,
-    synth_n_above: int | None = None,
-    synth_n_below: int = 0,
-    extreme_percentile: float = 0.90,
     stratify_seasons: bool = True,
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
@@ -312,14 +289,6 @@ def _base_cmd(
     ]
     if cluster_merge:
         cmd += ["--cluster-merge", cluster_merge]
-    if synth:
-        cmd += ["--synthetic-csv", synth]
-    if synth_n_above is not None:
-        cmd += ["--synth-n-above", str(synth_n_above)]
-    if synth_n_below:
-        cmd += ["--synth-n-below", str(synth_n_below)]
-    if extreme_percentile != 0.90:  # noqa: S1244
-        cmd += ["--extreme-percentile", str(extreme_percentile)]
     if not stratify_seasons:
         cmd += ["--no-stratify-seasons"]
     if n_neighbor_clusters != 1:
@@ -344,10 +313,6 @@ def _commit_safe() -> None:
 @app.function(image=image, volumes=_VOLUMES, timeout=3600, memory=16384)
 def discover_clusters(
     cluster_merge: str | None = None,
-    synthetic_csv: str | None = None,
-    synth_n_above: int | None = None,
-    synth_n_below: int = 0,
-    extreme_percentile: float = 0.90,
     stratify_seasons: bool = True,
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
@@ -357,12 +322,10 @@ def discover_clusters(
     """Carrega os dados, resolve o exp e lista os clusters presentes."""
     import subprocess
 
-    synth = _resolve_synth(synthetic_csv)
     extra = ["--list-clusters"]
     if exp_name:
         extra += ["--exp-name", exp_name]
-    base = _base_cmd(cluster_merge, synth, synth_n_above,
-                     synth_n_below, extreme_percentile, stratify_seasons,
+    base = _base_cmd(cluster_merge, stratify_seasons,
                      n_neighbor_clusters, eval_window, feature_groups)
     res = subprocess.run(
         base + extra,
@@ -394,10 +357,6 @@ def process_cluster(
     cid: str,
     exp_name: str,
     cluster_merge: str | None = None,
-    synthetic_csv: str | None = None,
-    synth_n_above: int | None = None,
-    synth_n_below: int = 0,
-    extreme_percentile: float = 0.90,
     stratify_seasons: bool = True,
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
@@ -407,10 +366,8 @@ def process_cluster(
     import subprocess
 
     artifact_volume.reload()
-    synth = _resolve_synth(synthetic_csv)
     print(f"[modal] ▶ Cluster {cid} (exp {exp_name})")
-    base = _base_cmd(cluster_merge, synth, synth_n_above,
-                     synth_n_below, extreme_percentile, stratify_seasons,
+    base = _base_cmd(cluster_merge, stratify_seasons,
                      n_neighbor_clusters, eval_window, feature_groups)
     # Streaming linha-a-linha (em vez de capture_output + print no final) —
     # com 14 clusters rodando em paralelo (.starmap), cada linha vem
@@ -437,10 +394,6 @@ def process_cluster(
 def aggregate_clusters(
     exp_name: str,
     cluster_merge: str | None = None,
-    synthetic_csv: str | None = None,
-    synth_n_above: int | None = None,
-    synth_n_below: int = 0,
-    extreme_percentile: float = 0.90,
     stratify_seasons: bool = True,
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
@@ -451,10 +404,8 @@ def aggregate_clusters(
     import subprocess
 
     artifact_volume.reload()
-    synth = _resolve_synth(synthetic_csv)
     print("[modal] Construindo agregados (CSV + heatmap + meta)...")
-    base = _base_cmd(cluster_merge, synth, synth_n_above,
-                     synth_n_below, extreme_percentile, stratify_seasons,
+    base = _base_cmd(cluster_merge, stratify_seasons,
                      n_neighbor_clusters, eval_window, feature_groups)
     extra = ["--exp-name", exp_name, "--aggregate-only"]
     if ablation_group:
@@ -590,10 +541,6 @@ def main(
     local_dir: str = "artifacts/lazy_modal",
     force_dataset_upload: bool = False,
     cluster_merge: str = "",
-    synthetic_csv: str = "",
-    synth_n_above: int = 0,
-    synth_n_below: int = 0,
-    extreme_percentile: float = 0.90,
     stratify_seasons: bool = True,
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
@@ -611,9 +558,9 @@ def main(
     --no-download          Roda mas não baixa artefatos
     --only-download        Só baixa; não roda
     --only-upload-dataset  Só sincroniza dataset/raw+shp pro volume; não roda
-                           nem baixa (volume compartilhado por lazy/mlp/lstm/gan)
+                           nem baixa (volume compartilhado por lazy/mlp/lstm)
     --build-cache          Gera/regenera o cache do merge ERA5 completo no
-                           volume (era5_merged_cache.nc) e sai. GAN/Lazy/MLP/
+                           volume (era5_merged_cache.nc) e sai. Lazy/MLP/
                            LSTM passam a usar esse cache automaticamente
                            (features novas ficam fora dele, sempre relidas).
     --interp-method        Com --build-cache: nearest (default, cache atual)
@@ -626,8 +573,6 @@ def main(
     --local-dir            Destino local (default: artifacts/lazy_modal)
     --force-dataset-upload Re-envia dataset mesmo se já no volume
     --cluster-merge        Agrega clusters, ex: "1-2-3,5-6"
-    --synthetic-csv        CSV sintético (local ou caminho no volume), ex:
-                           "gan_clusters/exp1/synthetic_augment.csv"
     --exp-name             Nome do experimento; senão autoincrementa exp{n}
     --feature-groups       Grupos separados por vírgula: original, era5_basin,
                            new_features, new_features_static,
@@ -665,32 +610,12 @@ def main(
 
     _ensure_dataset(force=force_dataset_upload)
 
-    # Augment: se for arquivo local, sobe para o volume; se já for caminho
-    # relativo ao volume, usa como está.
-    remote_synth = ""
-    if synthetic_csv:
-        if Path(synthetic_csv).exists():
-            remote_synth = "_augment_input/synthetic_augment.csv"
-            print(f"\nEnviando CSV sintético para o volume: {remote_synth}")
-            with artifact_volume.batch_upload(force=True) as up:
-                up.put_file(synthetic_csv, f"/{remote_synth}")
-        else:
-            # Remove prefixo local "artifacts/" para obter
-            # o caminho relativo ao volume (/artifacts/).
-            import re as _re
-            remote_synth = _re.sub(r"^artifacts/", "", synthetic_csv)
-
     cm = cluster_merge or None
-    synth = remote_synth or None
-    n_above = synth_n_above or None
-    n_below = synth_n_below
 
     # ── 1. Descobre clusters + resolve nome do experimento ────────────────
     print("\nDescobrindo clusters...")
     resolved_exp, clusters = discover_clusters.remote(
-        cluster_merge=cm, synthetic_csv=synth,
-        synth_n_above=n_above, synth_n_below=n_below,
-        extreme_percentile=extreme_percentile,
+        cluster_merge=cm,
         stratify_seasons=stratify_seasons,
         n_neighbor_clusters=n_neighbor_clusters,
         eval_window=eval_window,
@@ -707,8 +632,7 @@ def main(
     # ── 2. Fan-out: 1 container por cluster, em paralelo ──────────────────
     print("\nProcessando clusters em paralelo (1 container cada)...")
     args = [
-        (cid, resolved_exp, cm, synth, n_above, n_below,
-         extreme_percentile, stratify_seasons, n_neighbor_clusters, eval_window,
+        (cid, resolved_exp, cm, stratify_seasons, n_neighbor_clusters, eval_window,
          feature_groups or None)
         for cid in clusters
     ]
@@ -722,9 +646,7 @@ def main(
     # ── 3. Agrega o que terminou ──────────────────────────────────────────
     print("\nAgregando resultados...")
     created_files = aggregate_clusters.remote(
-        exp_name=resolved_exp, cluster_merge=cm, synthetic_csv=synth,
-        synth_n_above=n_above, synth_n_below=n_below,
-        extreme_percentile=extreme_percentile,
+        exp_name=resolved_exp, cluster_merge=cm,
         stratify_seasons=stratify_seasons,
         n_neighbor_clusters=n_neighbor_clusters,
         eval_window=eval_window,

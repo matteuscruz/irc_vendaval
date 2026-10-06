@@ -215,7 +215,6 @@ def run_mlp_clusters(
     extreme_power: float = 2.0,
     max_iter: int = 500,
     cluster_merge: str | None = None,
-    synthetic_csv: str | None = None,
     exp_name: str | None = None,
     feature_groups: str | None = None,
     ablation_group: str | None = None,
@@ -237,19 +236,6 @@ def run_mlp_clusters(
     if cluster_merge:
         print(f"[modal] cluster_merge: {cluster_merge}")
 
-    # CSV sintético: caminho relativo ao volume de artefatos (já montado em
-    # /artifacts). Ex.: "gan_augment/exp1/synthetic_augment.csv".
-    synthetic_path = None
-    if synthetic_csv:
-        synthetic_path = (
-            synthetic_csv if synthetic_csv.startswith("/")
-            else f"{REMOTE_ARTIFACTS_DIR}/{synthetic_csv}"
-        )
-        if not Path(synthetic_path).exists():
-            raise FileNotFoundError(
-                f"CSV sintético não encontrado no volume: {synthetic_path}"
-            )
-        print(f"[modal] augment: {synthetic_path}")
 
     # Cada run cria seu próprio exp{n} dentro de output_dir — não limpamos
     # o diretório para preservar os experimentos anteriores e o índice.
@@ -275,8 +261,6 @@ def run_mlp_clusters(
     ]
     if cluster_merge:
         cmd += ["--cluster-merge", cluster_merge]
-    if synthetic_path:
-        cmd += ["--synthetic-csv", synthetic_path]
     if exp_name:
         cmd += ["--exp-name", exp_name]
     if feature_groups:
@@ -453,7 +437,6 @@ def main(
     extreme_power: float = 2.0,
     max_iter: int = 500,
     cluster_merge: str = "",
-    synthetic_csv: str = "",
     exp_name: str = "",
     feature_groups: str = "",
     ablation_group: str = "",
@@ -467,16 +450,13 @@ def main(
     --no-download          Roda mas não baixa artefatos
     --only-download        Só baixa; não roda
     --only-upload-dataset  Só sincroniza dataset/raw+shp pro volume; não roda
-                           nem baixa (volume compartilhado por lazy/mlp/lstm/gan)
+                           nem baixa (volume compartilhado por lazy/mlp/lstm)
     --local-dir            Destino local (default: artifacts/mlp_modal)
     --force-dataset-upload Re-envia dataset mesmo se já no volume
     --hidden-layers        Camadas ocultas (default: "128,64")
     --alpha                Regularização L2 (default: 0.001)
     --extreme-power        Expoente do sample_weight (default: 2.0)
     --cluster-merge        Agrega clusters, ex: "1-2-3,5-6"
-    --synthetic-csv        CSV sintético — local (é enviado ao volume) ou já
-                           relativo ao volume, ex:
-                           "gan_clusters/exp1/synthetic_augment.csv"
     --exp-name             Nome do experimento; senão autoincrementa exp{n}
     --feature-groups       Grupos separados por vírgula: original, era5_basin,
                            new_features, new_features_static,
@@ -500,19 +480,6 @@ def main(
 
     _ensure_dataset(force=force_dataset_upload)
 
-    # Augment: se for um arquivo local, sobe para o volume; se já for um
-    # caminho relativo ao volume, usa como está.
-    remote_synth = ""
-    if synthetic_csv:
-        if Path(synthetic_csv).exists():
-            remote_synth = "_augment_input/synthetic_augment.csv"
-            print(f"\nEnviando CSV sintético para o volume: {remote_synth}")
-            with artifact_volume.batch_upload(force=True) as up:
-                up.put_file(synthetic_csv, f"/{remote_synth}")
-        else:
-            import re as _re
-            remote_synth = _re.sub(r"^artifacts/[^/]+/", "", synthetic_csv)
-
     print("\nSubmetendo pipeline MLP × Cluster...")
     created_files = run_mlp_clusters.remote(
         hidden_layers=hidden_layers,
@@ -520,7 +487,6 @@ def main(
         extreme_power=extreme_power,
         max_iter=max_iter,
         cluster_merge=cluster_merge or None,
-        synthetic_csv=remote_synth or None,
         exp_name=exp_name or None,
         feature_groups=feature_groups or None,
         ablation_group=ablation_group or None,

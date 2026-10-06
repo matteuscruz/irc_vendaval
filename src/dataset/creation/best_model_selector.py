@@ -21,7 +21,7 @@ from src.pipelines.common import compute_metrics, month_to_season
 _MODEL_STEM_RE = re.compile(r"^best_model_c(\d+)(?:_(DJF|MAM|JJA|SON))?$")
 
 PIPELINES = ["lazy", "mlp", "lstm"]
-ARMS = ["original", "synthetic", "newfeatures", "all", "basin", "all_basin"]
+ARMS = ["original", "newfeatures", "basin"]
 SEASONS_ORDER = ["DJF", "MAM", "JJA", "SON"]
 METRICS = ["R2", "RMSE", "Bias", "Bias_P90", "RMSE_P90"]
 
@@ -36,11 +36,8 @@ METRIC_DIRECTIONS = {
 # arm -> feature_groups, mesma matriz de scripts/_ablation_common.py::ABLATION_MATRIX.
 ARM_FEATURE_GROUPS = {
     "original": "original",
-    "synthetic": "original",
     "newfeatures": "original,new_features",
-    "all": "original,new_features",
     "basin": "original,era5_basin",
-    "all_basin": "original,new_features,era5_basin",
 }
 
 # Conjunto de avaliação COMUM: cada pipeline reporta o próprio teste (lazy/mlp

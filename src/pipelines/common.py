@@ -1,6 +1,6 @@
 """
 Constantes e utilitários compartilhados pelos pipelines de cluster
-(cluster_mlp, cluster_gan, gan_augment, cluster_lazy, mlp_pytorch).
+(cluster_lazy, cluster_mlp, cluster_lstm).
 """
 from __future__ import annotations
 
@@ -250,20 +250,8 @@ def select_complete_rows(df: pd.DataFrame, features: list[str], label: str = "")
 # 2000) em vez do antigo arquivo que só cobria 2020-2024 — ver
 # scripts/build_inmet_from_paired_csv.py.
 #
-# ATUALIZADO 2026-09-01: TRAIN_SLICE estendido pra incluir 2000-2007
-# deliberadamente, apesar de um comentário anterior aqui (removido nesta
-# mudança, ver git blame) dizer que isso já tinha sido testado e viesava o
-# modelo — o PR referenciado por esse comentário não pôde ser recuperado
-# (histórico git deste repo foi reconstruído após perda local, ver commit
-# "recover project state after local .git loss"), então essa alegação não
-# pôde ser reverificada. Decisão explícita do usuário de re-treinar mesmo
-# assim e comparar métricas antes/depois pra confirmar ou refutar o viés.
-# Cobertura de estações é esparsa em 2000-2007 (2 em 2000, 16 em 2002, 170+
-# só a partir de 2008) — se as métricas de validação piorarem depois desta
-# mudança, esse é o motivo mais provável.
-TRAIN_SLICE = ("2000-01-01", "2018-12-31")
-VAL_SLICE   = ("2019-01-01", "2019-12-31")
-TEST_SLICE  = ("2020-01-01", "2025-12-31")
+# A partição treino/validação/teste NÃO é por intervalo de anos: é por blocos de
+# mês (`MonthBlockSplit`, ver `default_month_block_split` abaixo).
 
 # Hemisfério sul: DJF=Verão, MAM=Outono, JJA=Inverno, SON=Primavera
 SEASONS = {"DJF": [12, 1, 2], "MAM": [3, 4, 5], "JJA": [6, 7, 8], "SON": [9, 10, 11]}
@@ -338,15 +326,6 @@ def build_flat_dataframe(
     df["month_cos"] = np.cos(2 * np.pi * _month / 12)
 
     return df
-
-
-# ── Splits temporais ──────────────────────────────────────────────────────────
-
-def make_split(df: pd.DataFrame, time_range: tuple[str, str]) -> pd.DataFrame:
-    """Recorte por intervalo de datas. Usado pelo `cluster_gan`, que mantém o
-    split por blocos de ano; lazy/mlp usam blocos de mês (`SPLIT_COL`)."""
-    mask = (df["time"] >= time_range[0]) & (df["time"] <= time_range[1])
-    return df[mask].copy()
 
 
 # ── Split por blocos de mês (lazy, mlp e LSTM) ────────────────────────────────
@@ -460,17 +439,6 @@ def apply_cluster_merge(
 
 
 # ── Pré-processamento (MLP/Lazy) ──────────────────────────────────────────────
-
-def drop_incomplete_synthetic(s: pd.DataFrame, features: list[str]) -> pd.DataFrame:
-    """Linhas sintéticas (CSV do GAN) sem alguma feature ativa — ex.: CSV
-    gerado antes das features novas existirem — são descartadas, não
-    imputadas."""
-    complete = s.reindex(columns=features).notna().all(axis=1)
-    if not complete.all():
-        print(f"   [AVISO] {int((~complete).sum())}/{len(s)} linhas sintéticas sem todas as "
-              "features ativas — descartadas (sem imputação)")
-    return s[complete]
-
 
 def assert_no_missing(x, label: str = "features") -> None:
     """Sem imputação: NaN que chegue ao modelo é bug de montagem dos dados

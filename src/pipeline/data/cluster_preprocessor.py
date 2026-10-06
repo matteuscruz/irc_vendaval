@@ -1,7 +1,7 @@
 """Construção dos dados da LSTM por cluster — fonte DIÁRIA.
 
 `ClusterDataBatch` é o contrato comum entre as fontes (diária aqui, horária em
-`hourly_builder.py`), o trainer, os augmenters e as métricas: janelas por
+`hourly_builder.py`), o trainer e as métricas: janelas por
 split × estação do ano, alvo = rajada máxima diária em m/s escalonada por
 `scaler_y` (sem razão × ERA5), cluster como one-hot no último passo da janela.
 """

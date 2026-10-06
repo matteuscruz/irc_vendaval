@@ -53,35 +53,6 @@ training:
   patience: 5
   min_samples: 10
 
-augmentation:
-  method: none               # extreme_gan | extreme_diffusion | none
-  extreme_percentile: 90.0   # top 10% = extremos
-  multiplier: 3.0            # gerar 3x a contagem de extremos reais
-  extreme_gan:
-    latent_dim: 32
-    hidden_units: 256
-    epochs: 200
-    batch_size: 64
-    n_critic: 5
-    lambda_gp: 10.0
-    lambda_y: 0.5
-    learning_rate_g: 0.0001
-    learning_rate_d: 0.0001
-    k_shift: 3              # iteracoes de distribution shifting
-    c_shift: 0.3            # fracao descartada por iteracao
-    # tau: 0.05             # prob. alvo para GPD inverse na inferencia
-    use_bias_correction: false  # QDM ERA5→INMET nas features de vento
-    n_quantiles: 100            # resolucao do mapeamento quantil
-  extreme_diffusion:
-    time_steps: 200
-    sampling_steps: 50
-    hidden_units: 512
-    time_emb_dim: 64
-    epochs: 100
-    batch_size: 64
-    p_uncond: 0.1
-    guidance_scale: 5.0
-
 visualization:
   enabled: true
   save_dir: plots

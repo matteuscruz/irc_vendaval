@@ -65,16 +65,16 @@ def artifacts_root(tmp_path):
 class TestDiscoverCombos:
     def test_finds_all_present_combos(self, artifacts_root):
         for pipeline in ("lazy", "mlp", "lstm"):
-            for arm in ("original", "synthetic"):
+            for arm in ("original", "newfeatures"):
                 combo_dir = artifacts_root / PIPELINE_ROOTS[pipeline] / arm
                 _write_results_csv(combo_dir, [_base_result_row(pipeline, arm, 1, "ALL", "test")])
 
         combos = discover_combos(artifacts_root)
         found = {(c.pipeline, c.arm) for c in combos}
         assert found == {
-            ("lazy", "original"), ("lazy", "synthetic"),
-            ("mlp", "original"), ("mlp", "synthetic"),
-            ("lstm", "original"), ("lstm", "synthetic"),
+            ("lazy", "original"), ("lazy", "newfeatures"),
+            ("mlp", "original"), ("mlp", "newfeatures"),
+            ("lstm", "original"), ("lstm", "newfeatures"),
         }
 
     def test_missing_arm_is_skipped_not_raised(self, artifacts_root, capsys):

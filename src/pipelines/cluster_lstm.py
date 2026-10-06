@@ -7,7 +7,6 @@ Jan/Abr/Jul/Out de todos os anos) — ver src/pipeline/data/splits.py.
 """
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
 
@@ -23,7 +22,7 @@ def _load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _print_final_summary(results_df, data, preds, aug_cfg=None):
+def _print_final_summary(results_df, data, preds):
     """Resumo enriquecido após avaliação: global, por season, extremos.
     `preds` (m/s) já vem calculado pelo chamador (`_predict_lstm_experts`)."""
     import numpy as np
@@ -107,120 +106,16 @@ def _print_final_summary(results_df, data, preds, aug_cfg=None):
                     f"{rmse_ext:.3f}  N_ext={int(mask_ext.sum())}"
                 )
 
-    if aug_cfg and aug_cfg.get("method") not in (None, "none"):
-        y_train = inverse_target(
-            data.scaler_y,
-            np.concatenate([v.ravel() for v in data.y_train.values() if len(v)]),
-        )
-        p = aug_cfg.get("extreme_percentile", 90)
-        thr_aug = float(np.percentile(y_train, p))
-        print(
-            f"\nAugmentacao: method={aug_cfg['method']}  "
-            f"extremos_treino={int(np.sum(y_train > thr_aug))}  limiar={thr_aug:.2f} m/s"
-        )
-
     print("=" * 60)
-
-
-def _inject_synthetic(data, synthetic_csv: str):
-    """
-    Injeta sintéticos (cluster_gan.py ou legado) em data.x_train/y_train.
-    Retorna um NOVO `ClusterDataBatch` (não muta `data` — mesmo precedente de
-    `BaseAugmenter._distribute_by_season`, via `dataclasses.replace`).
-
-    Os sintéticos só trazem a rajada (m/s) e o cluster; X vem emprestado da
-    janela REAL de treino do mesmo cluster/season com a rajada mais próxima
-    (nearest-neighbor em m/s, não no y escalonado).
-    """
-    import numpy as np
-    import pandas as pd
-
-    from src.pipeline.data.cluster_preprocessor import SEASONS
-    from src.pipeline.data.target import inverse_target
-
-    new_x_train = dict(data.x_train)
-    new_y_train = dict(data.y_train)
-
-    synth = pd.read_csv(synthetic_csv)
-    target_col = (
-        "daily_wind_gust_max" if "daily_wind_gust_max" in synth.columns
-        else "rajada_sintetica"
-    )
-    if target_col not in synth.columns:
-        raise ValueError(
-            f"{synthetic_csv} precisa ter coluna 'daily_wind_gust_max' "
-            "(cluster_gan.py) ou 'rajada_sintetica' (legado)."
-        )
-    if "cluster_id" not in synth.columns:
-        raise ValueError(f"{synthetic_csv} precisa ter coluna 'cluster_id'.")
-
-    col_idx_by_cluster = {
-        str(cid): data.feature_names.index(f"cluster_{cid}")
-        for cid in data.cluster_ids if f"cluster_{cid}" in data.feature_names
-    }
-    has_season_col = "season" in synth.columns
-    season_list = list(SEASONS)
-    rng = np.random.default_rng(42)
-
-    added = 0
-    for cid_raw, grp in synth.groupby("cluster_id"):
-        col_idx = col_idx_by_cluster.get(str(cid_raw))
-        if col_idx is None:
-            continue
-        y_synth_abs = grp[target_col].to_numpy(float)
-
-        counts = {
-            s: int(np.sum(new_x_train[s][:, -1, col_idx] == 1))
-            for s in season_list if s in new_x_train and len(new_x_train[s])
-        }
-        total = sum(counts.values())
-        if total == 0:
-            continue
-
-        if has_season_col:
-            season_assign = grp["season"].to_numpy()
-        else:
-            avail_seasons = [s for s in counts if counts[s] > 0]
-            probs = [counts[s] / total for s in avail_seasons]
-            season_assign = rng.choice(avail_seasons, size=len(y_synth_abs), p=probs)
-
-        for season in season_list:
-            if season not in new_x_train or len(new_x_train[season]) == 0:
-                continue
-            y_s = y_synth_abs[season_assign == season]
-            if len(y_s) == 0:
-                continue
-            mask_real = new_x_train[season][:, -1, col_idx] == 1
-            if not np.any(mask_real):
-                continue
-
-            x_real = new_x_train[season][mask_real]
-            y_real_abs = inverse_target(data.scaler_y, new_y_train[season][mask_real])
-
-            order = np.argsort(y_real_abs)
-            idx = np.clip(np.searchsorted(y_real_abs[order], y_s), 0, len(y_real_abs) - 1)
-            x_new = x_real[order[idx]]
-            y_new_scaled = data.scaler_y.transform(y_s.reshape(-1, 1)).astype("float32")
-
-            new_x_train[season] = np.concatenate([new_x_train[season], x_new], axis=0)
-            new_y_train[season] = np.concatenate([new_y_train[season], y_new_scaled], axis=0)
-            # NOTA: meta_train não é estendido — só meta_test é lido (para o
-            # predictions_by_station.csv), e o teste nunca recebe sintéticos.
-            added += len(y_s)
-
-    print(f"[synthetic] +{added} pares (X_real, y_sintético) injetados de {synthetic_csv}")
-    return dataclasses.replace(data, x_train=new_x_train, y_train=new_y_train)
 
 
 def preprocess_lstm_data(
     config: str,
-    augmentation_method: str | None = None,
-    synthetic_csv: str | None = None,
     feature_groups: str | None = None,
     exp_name_override: str | None = None,
 ):
     """Carrega/valida o YAML, fixa a semente, constrói o `ClusterDataBatch`
-    (fonte diária ou horária, ver `build_lstm_batch`) e injeta sintéticos.
+    (fonte diária ou horária, ver `build_lstm_batch`).
 
     Retorna `(data, resolved_exp_name, cfg)` — quem for treinar deve
     reconstruir o `ArtifactManager` com esse nome explícito, nunca `None` de
@@ -231,9 +126,6 @@ def preprocess_lstm_data(
     from src.utils.seeding import set_global_seed
 
     cfg = validate_lstm_config(_load_config(config))
-
-    if augmentation_method and "augmentation" in cfg:
-        cfg["augmentation"]["method"] = augmentation_method
 
     exp_cfg = cfg["experiment"]
     data_cfg = cfg["data"]
@@ -248,9 +140,6 @@ def preprocess_lstm_data(
     print(f"Saída: {manager.root}\n")
 
     data = build_lstm_batch(cfg)
-
-    if synthetic_csv:
-        data = _inject_synthetic(data, synthetic_csv)
 
     return data, manager.exp_dir.name, cfg
 
@@ -275,7 +164,7 @@ def _window_spec(data):
 
 def train_lstm_and_finalize(
     data, resolved_exp_name: str, cfg: dict, config: str,
-    synthetic_csv: str | None = None, ablation_group: str | None = None,
+    ablation_group: str | None = None,
 ) -> None:
     """Treina, avalia, serializa modelos + `dl_metadata.joblib` (schema v2) e
     exporta predições/gráficos no MESMO diretório resolvido por
@@ -308,17 +197,6 @@ def train_lstm_and_finalize(
         min_samples=train_cfg.get("min_samples", 10),
         seed=seed,
     )
-
-    aug_cfg = cfg.get("augmentation")
-    if aug_cfg:
-        from src.pipeline.augmentation.factory import augmenter_factory
-
-        # Checkpoint dentro do diretório do experimento — um retry do MESMO
-        # exp_name retoma o treino do GAN/diffusion (src/pipeline/augmentation/checkpoint.py).
-        augmenter = augmenter_factory(aug_cfg, checkpoint_dir=str(output_dir / "_gan_checkpoint"))
-        if augmenter is not None:
-            print("\n[augmentation] Gerando amostras sinteticas de extremos...")
-            data = augmenter.fit_augment(data)
 
     print("\n[training] Iniciando treinamento (1 LSTM por cluster)...")
     result = trainer.fit(data)
@@ -368,8 +246,6 @@ def train_lstm_and_finalize(
         "climatology": data.climatology,
         "hourly": data.hourly,
         "seed": seed,
-        "augmentation": aug_cfg,
-        "synthetic_csv": synthetic_csv,
         "feature_groups": feature_groups,
         "active_features": data.feature_names,
         "ablation_group": ablation_group,
@@ -381,7 +257,7 @@ def train_lstm_and_finalize(
         index_path = manager.append_experiments_index(unified_results_df)
         print(f"Índice atualizado: {index_path}")
 
-    _print_final_summary(results_df, data, preds, aug_cfg)
+    _print_final_summary(results_df, data, preds)
 
     # ── Serializar modelos + metadados v2 para inferência ────────────────
     import joblib
@@ -480,8 +356,6 @@ def train_lstm_and_finalize(
 
 def run(
     config: str,
-    augmentation_method: str | None = None,
-    synthetic_csv: str | None = None,
     feature_groups: str | None = None,
     ablation_group: str | None = None,
     exp_name_override: str | None = None,
@@ -490,9 +364,8 @@ def run(
     """Executa a LSTM por cluster via YAML — composição de
     `preprocess_lstm_data` + `train_lstm_and_finalize`."""
     data, resolved_exp_name, cfg = preprocess_lstm_data(
-        config, augmentation_method, synthetic_csv, feature_groups,
-        exp_name_override,
+        config, feature_groups, exp_name_override,
     )
     train_lstm_and_finalize(
-        data, resolved_exp_name, cfg, config, synthetic_csv, ablation_group,
+        data, resolved_exp_name, cfg, config, ablation_group,
     )

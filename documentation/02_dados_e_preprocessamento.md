@@ -42,13 +42,6 @@ mesmo rótulo. Em lazy e mlp não há purga: a amostra é um único dia.
 > linhas sem climatologia são descartadas, apagaria ~95% do teste. Por isso as
 > três pipelines usam a **climatologia harmônica** (ver abaixo).
 
-O `cluster_gan` é a exceção: segue no split por blocos de ano
-(`TRAIN_SLICE`/`VAL_SLICE`/`TEST_SLICE`), o que significa que seu pool de
-treino inclui os meses de teste das demais pipelines. Como as amostras
-sintéticas alimentam o treino de lazy/mlp, há aí um vazamento indireto
-conhecido e ainda não resolvido — relevante apenas para os braços que usam
-dados sintéticos.
-
 ## Features
 
 Só entram features derivadas do ERA5 (mais calendário e coordenadas da estação):

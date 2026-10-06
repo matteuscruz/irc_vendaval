@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Mostra quais experimentos da matriz de ablation já foram rodados.
 
-Varre os diretórios locais das 3 pipelines (+ o do GAN) procurando por
-results.csv/synthetic_augment.csv já baixados, e lê o run_meta.json de cada
-um pra mostrar com que config (feature_groups, ablation_group, synthetic_csv,
+Varre os diretórios locais das 3 pipelines procurando por
+results.csv já baixados, e lê o run_meta.json de cada
+um pra mostrar com que config (feature_groups, ablation_group,
 timestamp) cada experimento foi gerado — útil para conferir antes de rodar
 run_ablation_modal_all.sh de novo, e não repetir braços que já estão prontos.
 
@@ -47,9 +47,7 @@ def _status_line(label: str, exp_dir: Path) -> str:
 
     ts = meta.get("timestamp", "?")
     fg = meta.get("feature_groups", "?")
-    synth = meta.get("synthetic_csv")
-    synth_str = Path(synth).name if synth else "—"
-    return f"  {label:<28} PRONTO      ts={ts}  feature_groups={fg}  synthetic={synth_str}"
+    return f"  {label:<28} PRONTO      ts={ts}  feature_groups={fg}"
 
 
 def main():
@@ -60,26 +58,12 @@ def main():
                         help="YAML da LSTM — usado só para resolver onde os resultados ficam localmente")
     parser.add_argument("--lstm-dir", default=None,
                         help="Alternativa: caminho local direto (se não quiser passar --lstm-config)")
-    parser.add_argument("--gan-dir", default=str(ROOT / "artifacts" / "gan_modal" / "gan_clusters"))
     parser.add_argument("--exp-prefix", default="")
     args = parser.parse_args()
 
     print("=" * 70)
     print("  STATUS DA MATRIZ DE ABLATION")
     print("=" * 70)
-
-    # ── GAN (dados sintéticos) ──
-    gan_dir = Path(args.gan_dir)
-    print("\n[GAN — dados sintéticos]")
-    if gan_dir.exists() and any(gan_dir.iterdir()):
-        for exp_dir in sorted(gan_dir.iterdir()):
-            csv_path = exp_dir / "synthetic_augment.csv"
-            if csv_path.exists():
-                meta = _read_meta(exp_dir)
-                ts = meta.get("timestamp", "?") if meta else "?"
-                print(f"  {exp_dir.name:<28} PRONTO      ts={ts}  ({csv_path})")
-    else:
-        print(f"  Nenhum experimento encontrado em {gan_dir}")
 
     # ── LSTM: resolve diretório local a partir do --config, se dado ──
     lstm_dir = None

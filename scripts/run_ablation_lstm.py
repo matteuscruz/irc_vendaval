@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Matriz de ablation: cluster_lstm em 4 combinações de dados/features.
+"""Matriz de ablation: cluster_lstm em 3 combinações de features.
 
-Mesma matriz de scripts/run_ablation.py (original / +sintético / +features
-novas / tudo junto), mas para o pipeline LSTM (schema v2). cluster_lstm é
+Mesma matriz de scripts/run_ablation.py (original / +features novas /
++ERA5-Basin), mas para o pipeline LSTM (schema v2). cluster_lstm é
 YAML-driven — cada braço reusa a MESMA config base, sobrepondo
-feature_groups/ablation_group/exp_name via parâmetros de run() (mesmo padrão
-já usado para --augmentation-method), sem precisar de 4 arquivos YAML.
+feature_groups/ablation_group/exp_name via parâmetros de run(), sem precisar
+de um YAML por braço.
 
 Uso:
-    python3 scripts/run_ablation_lstm.py --config config/experiment_cluster_lstm_modal.yaml \\
-        --synthetic-csv artifacts/gan_clusters/exp1/synthetic_augment.csv
+    python3 scripts/run_ablation_lstm.py --config config/experiment_cluster_lstm_modal.yaml
     python3 scripts/run_ablation_lstm.py --config config/experiment_cluster_lstm_modal.yaml --only original --skip-summary
 """
 from __future__ import annotations
@@ -30,24 +29,11 @@ def main():
     parser = argparse.ArgumentParser(description="Matriz de ablation para cluster_lstm")
     parser.add_argument("--config", required=True,
                         help="YAML base (config/experiment_cluster_lstm_modal.yaml ou similar)")
-    parser.add_argument("--synthetic-csv", default=None,
-                        help="Obrigatório se algum braço selecionado usar dados sintéticos "
-                             "e --synthetic-mode=nearest_neighbor (default)")
-    parser.add_argument("--synthetic-mode", default="nearest_neighbor",
-                        choices=["nearest_neighbor", "extreme_gan", "extreme_diffusion"],
-                        help="Como os braços 'synthetic'/'all'/'all_basin' geram os dados "
-                             "sintéticos do LSTM. 'nearest_neighbor' (default, retrocompatível): "
-                             "injeta o CSV tabular via --synthetic-csv (cluster_gan.py), "
-                             "emprestando uma sequência real inteira e só trocando o alvo — é o "
-                             "caminho que quebra a coerência temporal do LSTM. 'extreme_gan'/"
-                             "'extreme_diffusion': gera X (sequência) e y JUNTOS via "
-                             "augmentation.method do YAML (ExGANAugmenter/ExtremeDiffusionAugmenter), "
-                             "sem nearest-neighbor pós-hoc — ignora --synthetic-csv.")
     parser.add_argument("--exp-prefix", default="",
                         help="Prefixo opcional pro nome do diretório de experimento "
                              "(default: vazio — diretório fica só com o nome do braço, ex: 'original')")
     parser.add_argument("--only", default=None,
-                        help="Rodar só um braço (original|synthetic|newfeatures|all)")
+                        help="Rodar só um braço (original|newfeatures|basin)")
     parser.add_argument("--skip-summary", action="store_true")
     parser.add_argument("--summary-only", action="store_true",
                         help="Só regenera o resumo/plots a partir de experimentos já rodados (não treina nada)")
@@ -75,36 +61,16 @@ def main():
     arm_names = {exp: c["name"] for exp, c in zip(exp_names, combos)}
 
     if not args.summary_only:
-        needs_synth = any(c["use_synthetic"] for c in combos)
-        if needs_synth and args.synthetic_mode == "nearest_neighbor" and not args.synthetic_csv:
-            parser.error(
-                "Um ou mais braços selecionados usam dados sintéticos — informe --synthetic-csv "
-                "(gere com: python3 main.py cluster_gan --exp-name <nome>), ou use "
-                "--synthetic-mode extreme_gan/extreme_diffusion (não precisa de CSV)."
-            )
-
         from src.pipelines.cluster_lstm import run as run_cluster_lstm
 
         for combo, exp_name in zip(combos, exp_names):
             print(f"\n{'=' * 70}\n[ablation] Braço: {combo['name']}  (exp_name={exp_name})\n{'=' * 70}")
-            use_synth = combo["use_synthetic"]
-            if use_synth and args.synthetic_mode != "nearest_neighbor":
-                run_cluster_lstm(
-                    config=args.config,
-                    augmentation_method=args.synthetic_mode,
-                    synthetic_csv=None,
-                    feature_groups=combo["feature_groups"],
-                    ablation_group=combo["name"],
-                    exp_name_override=exp_name,
-                )
-            else:
-                run_cluster_lstm(
-                    config=args.config,
-                    synthetic_csv=args.synthetic_csv if use_synth else None,
-                    feature_groups=combo["feature_groups"],
-                    ablation_group=combo["name"],
-                    exp_name_override=exp_name,
-                )
+            run_cluster_lstm(
+                config=args.config,
+                feature_groups=combo["feature_groups"],
+                ablation_group=combo["name"],
+                exp_name_override=exp_name,
+            )
 
     if not args.skip_summary:
         summary_dir = output_dir / comparison_dirname(args.exp_prefix)

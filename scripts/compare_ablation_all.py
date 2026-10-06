@@ -4,7 +4,7 @@
 Diferente de scripts/run_ablation*.py (compara os braços DENTRO de uma
 pipeline) e de scripts/compare_pipelines.py (compara pipelines usando um
 único experimento cada), este script junta as 18 combinações
-(lazy/mlp/lstm × original/synthetic/newfeatures/all/basin/all_basin) numa
+(lazy/mlp/lstm × original/newfeatures/basin) numa
 tabela e num conjunto de plots só, respondendo "qual pipeline se beneficia
 mais de qual componente".
 
@@ -85,10 +85,9 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
 def build_ranking(summary_df: pd.DataFrame, rank_by: str) -> pd.DataFrame:
     """Rankeia os braços DENTRO de cada pipeline por `rank_by` (rank 1 = melhor).
 
-    R² geral mascara desempenho na cauda (ver gans_research.md, eixo TSTR) —
-    'RMSE_P90'/'Bias_P90' são a régua recomendada pra julgar se um braço com
-    dados sintéticos realmente ajuda nos extremos, não só no corpo da
-    distribuição. `Bias_P90` rankeia por |Bias_P90| (mais perto de 0 é
+    R² geral mascara desempenho na cauda — 'RMSE_P90'/'Bias_P90' são a régua
+    recomendada pra julgar se um braço realmente ajuda nos extremos, não só no
+    corpo da distribuição. `Bias_P90` rankeia por |Bias_P90| (mais perto de 0 é
     melhor, sinal não importa pra ranking).
     """
     df = summary_df.copy()
@@ -234,8 +233,8 @@ def main():
                         help="Métrica usada pra rankear os braços dentro de cada pipeline em "
                              "tstr_ranking.csv (rank 1 = melhor). Default R2 preserva o "
                              "comportamento de leitura anterior; RMSE_P90/Bias_P90 julgam pela "
-                             "cauda (P90+), a régua recomendada pra decidir se um braço com "
-                             "dados sintéticos ajuda de verdade nos extremos (ver gans_research.md).")
+                             "cauda (P90+), a régua recomendada pra decidir se um braço ajuda "
+                             "de verdade nos extremos.")
     args = parser.parse_args()
 
     base_dirs = {

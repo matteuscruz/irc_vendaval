@@ -64,7 +64,7 @@ def test_require_target_false_keeps_rows_without_inmet_observation():
 
 
 def test_default_still_requires_target_backward_compatible():
-    """Chamadores de treino (cluster_lazy/mlp/lstm/gan) não passam
+    """Chamadores de treino (cluster_lazy/mlp/lstm) não passam
     `require_target` explicitamente — o default precisa continuar True."""
     ds_inmet, ds_era5, station_clusters, ds_clim = _tiny_dataset()
     df_default = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)

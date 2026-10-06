@@ -11,6 +11,8 @@ RESOLUTIONS = ("daily", "hourly")
 REMOVED_DATA_KEYS = ("train_slice", "val_slice", "test_slice", "test_station_fraction")
 # Features de observação INMET foram removidas (não existem na grade ERA5).
 REMOVED_OBSERVATION_KEYS = ("exclude_observation_features", "blank_cross_split_observations")
+# O GAN/difusão (data augmentation) saiu do repositório: a config não pode mais pedi-lo.
+REMOVED_TOP_LEVEL_KEYS = ("augmentation",)
 REMOVED_MODEL_PARAMS = (
     "l2_reg", "weight_normal", "weight_extreme", "extreme_weight", "extreme_threshold",
     "static_hidden", "dropout_static", "recurrent_dropout",
@@ -32,6 +34,12 @@ def validate_lstm_config(cfg: dict) -> dict:
         errors.append(
             f"chaves removidas na LSTM v2: {removed} — o split agora é data.split "
             "(blocos de mês) e o modelo é LSTM → Dropout → Dense(1) com Huber"
+        )
+    removed_top = [k for k in REMOVED_TOP_LEVEL_KEYS if k in cfg]
+    if removed_top:
+        errors.append(
+            f"chaves removidas: {removed_top} — a geração de dados sintéticos (GAN/difusão) "
+            "saiu deste repositório; remova o bloco do YAML"
         )
     removed_obs = [f"data.{k}" for k in REMOVED_OBSERVATION_KEYS if k in data]
     if removed_obs:

@@ -32,10 +32,10 @@ _SYNTHETIC_STATIONS = [
 
 
 def _synthetic_dates() -> pd.DatetimeIndex:
-    """Dia 15 de cada mês, 2008-2025 — cobre TRAIN_SLICE (2008-2018),
-    VAL_SLICE (2019) e TEST_SLICE (2020-2025) de src/pipelines/common.py
-    com datas de calendário reais, mas em baixa densidade (216 pontos em vez
-    de ~6500 dias) para os testes ficarem rápidos."""
+    """Dia 15 de cada mês, 2008-2025 — todos os meses de todos os anos, para cobrir
+    os meses de teste (jan/abr/jul/out) e os de treino do split por blocos de mês,
+    mas em baixa densidade (216 pontos em vez de ~6500 dias) para os testes
+    ficarem rápidos."""
     return pd.date_range("2008-01-01", "2025-12-01", freq="MS") + pd.Timedelta(days=14)
 
 
@@ -154,8 +154,7 @@ def build_synthetic_raw_dir(raw_dir: Path, dates: pd.DatetimeIndex | None = None
 
     # Rajada correlacionada com o vento ERA5 + ruído + eventos extremos
     # ocasionais (~5%) — não precisa ser fisicamente realista, só dar sinal
-    # suficiente pros modelos treinarem/avaliarem sem degenerar (ex.: GPD/EVT
-    # do GAN precisa de alguns extremos de verdade pra ajustar).
+    # suficiente pros modelos treinarem/avaliarem sem degenerar.
     basin = _synthetic_basin(dates, rng)
     basin.to_netcdf(raw_dir / BASIN_FILENAME)
     node_ws_max = basin["ws_max"].sel(

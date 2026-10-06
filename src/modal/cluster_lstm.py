@@ -40,8 +40,6 @@ modal run src/modal/cluster_lstm.py --force-dataset-upload
 # Config diferente
 modal run src/modal/cluster_lstm.py --config experiment_cluster_lstm_modal.yaml
 
-# Com augmentação ExGAN
-modal run src/modal/cluster_lstm.py --augmentation-method extreme_gan
 """
 
 from __future__ import annotations
@@ -93,7 +91,7 @@ image = (
         "netCDF4>=1.6.0",
         "geopandas>=0.14.0",
         "pyshp>=2.3.0",
-        "scipy>=1.12.0",    # GPD / EVT do ExGAN
+        "scipy>=1.12.0",
     )
     .env(
         {
@@ -225,23 +223,15 @@ def _ensure_dataset(force: bool = False) -> None:
         REMOTE_ARTIFACTS_DIR: artifact_volume,
         REMOTE_DATASET_DIR: dataset_volume,
     },
-    gpu="A10G",      # A10G para runs com augmentação (GPU mais rápida)
-    timeout=21600,   # 6 horas — margem de segurança (Modal só cobra pelo
-                     # tempo real de execução, não pelo teto do timeout).
-                     # Um run real travou 3h sem terminar antes da correção
-                     # de performance do ExGAN/Diffusion (eager mode +
-                     # steps_per_epoch escalando com o dataset); com a
-                     # correção, o esperado é ~1h para augmentation.method
-                     # extreme_gan/extreme_diffusion — 6h é folga generosa,
-                     # não uma expectativa de tempo real de execução.
+    gpu="A10G",
+    timeout=21600,   # 6 horas — teto de segurança (Modal só cobra pelo tempo
+                     # real de execução, não pelo teto do timeout).
     memory=32768,    # 32 GB RAM (NetCDF + xarray são mais exigentes)
     # nonpreemptible=True não suportado em workloads de GPU (Modal) — sem
     # checkpoint por cluster, uma preempção aqui reinicia os 14 do zero.
 )
 def run_experiment(
     config_name: str = "experiment_cluster_lstm_modal.yaml",
-    augmentation_method: str | None = None,
-    synthetic_csv: str | None = None,
     feature_groups: str | None = None,
     ablation_group: str | None = None,
     exp_name: str | None = None,
@@ -254,24 +244,17 @@ def run_experiment(
     ----------
     config_name : str
         Nome do YAML em config/.
-    augmentation_method : str | None
-        Se definido, sobrescreve augmentation.method do YAML.
-        Opções: 'extreme_gan', 'extreme_diffusion', 'none'.
     """
     import subprocess
     import time
 
     # Container novo pode não enxergar commits feitos por uma tentativa
-    # anterior (retry do mesmo exp_name) sem um reload explícito — é onde
-    # um checkpoint parcial de augmentation.method=extreme_gan/
-    # extreme_diffusion salvo antes de um timeout/crash anterior estaria.
+    # anterior (retry do mesmo exp_name) sem um reload explícito.
     artifact_volume.reload()
 
     config_path = f"{REMOTE_APP_DIR}/config/{config_name}"
     print(f"[modal] Dataset: {REMOTE_DATASET_DIR}")
     print(f"[modal] Config: {config_path}")
-    if augmentation_method:
-        print(f"[modal] Augmentação: {augmentation_method}")
 
     artifacts_root = Path(REMOTE_ARTIFACTS_DIR)
     before: set[str] = (
@@ -286,10 +269,6 @@ def run_experiment(
         "cluster_lstm",
         "--config", config_path,
     ]
-    if augmentation_method:
-        cmd += ["--augmentation-method", augmentation_method]
-    if synthetic_csv:
-        cmd += ["--synthetic-csv", synthetic_csv]
     if feature_groups:
         cmd += ["--feature-groups", feature_groups]
     if ablation_group:
@@ -302,12 +281,8 @@ def run_experiment(
     # não dava pra saber se estava progredindo ou travado.
     #
     # Commit periódico do volume DURANTE o streaming (não só no final): sem
-    # isso, qualquer checkpoint que augmentation.method=extreme_gan/
-    # extreme_diffusion escreva em disco (ver src/pipeline/augmentation/
-    # checkpoint.py) fica só no filesystem local do container — se o
-    # processo for morto por timeout (como aconteceu num run real), esses
-    # checkpoints nunca chegam a ser persistidos no volume e um retry
-    # recomeça do zero mesmo com o mecanismo de resume implementado.
+    # isso, o que o processo escreve fica só no filesystem local do container —
+    # se ele for morto por timeout, nada chega ao volume.
     COMMIT_INTERVAL_S = 120
     proc = subprocess.Popen(
         cmd, cwd=REMOTE_APP_DIR, text=True,
@@ -460,8 +435,6 @@ def generate_spatial_maps(
 @app.local_entrypoint()
 def main(
     config: str = "experiment_cluster_lstm_modal.yaml",
-    augmentation_method: str | None = None,
-    synthetic_csv: str | None = None,
     feature_groups: str | None = None,
     ablation_group: str | None = None,
     exp_name: str | None = None,
@@ -478,10 +451,6 @@ def main(
     Flags
     -----
     --config               YAML em config/
-    --augmentation-method  Override augmentation.method
-                           (extreme_gan | extreme_diffusion | none)
-    --synthetic-csv        Path no volume para CSV de sintéticos do GAN
-                           (ex: /artifacts/gan/synthetic_extremes.csv)
     --feature-groups       Grupos separados por vírgula: original, era5_basin,
                            new_features, new_features_static,
                            new_features_dynamic (ou 'all'); sobrepõe
@@ -493,7 +462,7 @@ def main(
     --only-download        Só baixa; não treina
     --only-upload-dataset  Só sincroniza dataset/raw+shp pro volume; não treina
                            nem baixa (volume 'irc-vendaval-dataset' é
-                           compartilhado por lazy/mlp/lstm/gan — subir por
+                           compartilhado por lazy/mlp/lstm — subir por
                            qualquer um dos wrappers basta)
     --local-dir            Destino local (default: artifacts/modal)
     --force-dataset-upload Re-envia dataset mesmo se já no volume
@@ -513,22 +482,9 @@ def main(
 
     _ensure_dataset(force=force_dataset_upload)
 
-    remote_synthetic: str | None = None
-    if synthetic_csv:
-        local_p = Path(synthetic_csv)
-        if not local_p.exists():
-            raise FileNotFoundError(f"synthetic_csv não encontrado: {local_p}")
-        remote_path = f"/synthetic/{local_p.name}"
-        print(f"Enviando {local_p.name} → volume:{remote_path} ...")
-        with artifact_volume.batch_upload(force=True) as upload:
-            upload.put_file(str(local_p), remote_path)
-        remote_synthetic = f"{REMOTE_ARTIFACTS_DIR}{remote_path}"
-        print(f"Upload concluído: {remote_synthetic}")
-
     print(f"\nSubmetendo experimento: {config}")
     created_files = run_experiment.remote(
-        config, augmentation_method, remote_synthetic,
-        feature_groups, ablation_group, exp_name,
+        config, feature_groups, ablation_group, exp_name,
     )
 
     # Resolve exp_dir from the created files
