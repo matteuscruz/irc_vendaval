@@ -20,6 +20,10 @@ Ordem dos estágios (cada um é um portão para o seguinte):
   screen     congela os 5 melhores por trimestre em summary/top_models.json
   study      os 5 modelos em TODOS os arms
   aggregate  efeitos pareados, bootstrap em blocos, ranking
+
+LSTM (fora do `all`; mesmos arms e linhas, saída em `units/<tag>_lstm/`):
+  python scripts/run_feature_study_local.py run --stage lstm --seeds 42 [--seasons DJF]
+  python scripts/run_feature_study_local.py run --stage aggregate-lstm --seeds 42
 """
 from __future__ import annotations
 
@@ -182,8 +186,34 @@ def estagio_aggregate(plano: Plano) -> None:
     print(res["ranking_groups"].to_string(index=False))
 
 
+def estagio_lstm(plano: Plano) -> None:
+    """Os mesmos arms, com a LSTM no lugar dos modelos tabulares. Fora do `all`: é um segundo
+    estudo sobre a mesma população, com a saída em `units/<tag>_lstm/`."""
+    from src.feature_study.core.worker_lstm import run_unit_lstm
+
+    arms = plano.arms()
+    unidades = [
+        (f"{s} seed {seed} — {len(arms)} arms, LSTM, janela de {plano.args.window_hours} h",
+         lambda s=s, seed=seed: run_unit_lstm(
+             plano.data, plano.out, RAIZ / plano.args.raw_dir, "full", s, arms, seed=seed,
+             out_tag=plano.seed_tag(seed) + "_lstm", window_hours=plano.args.window_hours))
+        for seed in plano.seeds for s in plano.seasons
+    ]
+    _roda_unidades(plano, unidades, "lstm")
+
+
+def estagio_aggregate_lstm(plano: Plano) -> None:
+    from src.feature_study.core.analysis import run_aggregate
+
+    tags = [t + "_lstm" for t in plano.tags]
+    res = run_aggregate(plano.out, plano.data, tags, label="lstm", n_boot=plano.args.n_boot)
+    print(res["ranking_groups"].to_string(index=False))
+
+
 ESTAGIO_FN = {"prepare": estagio_prepare, "triage": estagio_triage, "screen": estagio_screen,
-              "study": estagio_study, "aggregate": estagio_aggregate}
+              "study": estagio_study, "aggregate": estagio_aggregate,
+              "lstm": estagio_lstm, "aggregate-lstm": estagio_aggregate_lstm}
+LSTM_STAGES = ("lstm", "aggregate-lstm")
 
 
 def mostra_plano(plano: Plano) -> None:
@@ -224,7 +254,8 @@ def mostra_status(plano: Plano) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("comando", choices=("plan", "run", "status"))
-    ap.add_argument("--stage", choices=(*STAGES, "all"), default="all")
+    ap.add_argument("--stage", choices=(*STAGES, *LSTM_STAGES, "all"), default="all",
+                    help="`all` não inclui a LSTM: rode `--stage lstm` e depois `--stage aggregate-lstm`")
     ap.add_argument("--out-dir", default=DEFAULT_OUT)
     ap.add_argument("--raw-dir", default="dataset/raw")
     ap.add_argument("--seeds", default="42", help="seeds separadas por vírgula (padrão: só a 42)")
@@ -233,6 +264,7 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=4, help="teto de threads (padrão 4 de 8)")
     ap.add_argument("--k", type=int, default=5, help="modelos por trimestre na triagem")
     ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--window-hours", type=int, default=24, help="janela da LSTM, em horas até a hora do pico")
     ap.add_argument("--min-free-gb", type=float, default=1.0, help="RAM livre mínima antes de cada unidade")
     ap.add_argument("--force", action="store_true", help="refaz o prepare")
     args = ap.parse_args()

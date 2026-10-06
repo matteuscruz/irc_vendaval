@@ -243,6 +243,60 @@ sobre o eixo de dias de 2000–2024 do alvo INMET e gravada na coluna `_split`:
   2019 / teste 2020–2025) e o `cluster_gan` que o usava saíram: o GAN foi extraído para o repositório
   `irc_vendaval_gan`, e as constantes `TRAIN_SLICE`/`VAL_SLICE`/`TEST_SLICE` foram removidas.
 
+## LSTM no mesmo estudo (`worker_lstm.py`, `data/sequences.py`)
+
+Repete o estudo com um modelo sequencial para checar se as conclusões das árvores valem fora delas.
+**Mesma população, mesmos arms, mesmos `row_id`, mesma partição e o mesmo `aggregate`**; muda só o modelo.
+
+- **Entrada:** cada linha vira a janela das últimas `T` horas (padrão 24) até a hora do pico. As colunas dos
+  grupos 1–3 entram como sequência (uma leitura por hora, lida dos parquets); o resto (relevo, lat/lon, ruído e
+  estáticas permutadas) é constante na linha e se repete a cada passo. O último passo é exatamente a linha
+  que o estudo tabular usa.
+- **Modelo:** o da pipeline `cluster_lstm` (LSTM(96) → Dropout(0,3) → Dense(1), Huber, Adam, parada antecipada
+  na validação), `RobustScaler` por feature ajustado só no treino, saída truncada em [0, 80].
+- **Linhas:** sem imputação, uma linha com hora faltando na janela sai. O critério é a janela completa para a
+  **união das colunas de todos os arms**, não de cada arm, para todos avaliarem nas mesmas linhas (senão o
+  `compute_effects` descarta os pares com linhas diferentes e as comparações somem sem erro). Saem ~15 de 40 mil.
+- **Saída:** `units/<tag>_lstm/` (`metrics`, `resid`, `preds`) e, só no arm `full`, `importance__<trimestre>__full`
+  (permutação por coluna e por grupo, mesma permutação nos `T` passos).
+
+```bash
+# local (seed 42, ~18 min, pico de ~3 GB de RAM); fora do `all`
+python scripts/run_feature_study_local.py run --stage lstm --seeds 42
+python scripts/run_feature_study_local.py run --stage aggregate-lstm --seeds 42     # → summary/lstm
+# Modal (GPU T4; uma unidade por seed × trimestre); piloto: --seeds 42 --arms base,full
+modal run src/modal/feature_study.py --stage fit-lstm --study <nome> --seeds 42,43,44,45,46
+modal run src/modal/feature_study.py --stage aggregate --lstm --study <nome>
+```
+
+**Resultado (seed 42, 11 arms, bootstrap em blocos; ganho de RMSE, positivo = o segundo é melhor):**
+
+| comparação | LSTM | árvores (5 seeds) |
+|---|---|---|
+| remover grupo 1 | **+0,143** acrescenta | +0,216 acrescenta |
+| somar grupo 2 | **−0,158** prejudica | −0,008 sem informação |
+| somar grupo 3 | −0,001 sem informação | −0,006 sem informação |
+| somar grupo 4 | **−0,232** prejudica | +0,021 inconclusivo |
+| `full` contra `base` | **−0,290** prejudica | +0,005 sem informação |
+| controle de ruído | +0,003 sem informação | −0,002 sem informação |
+| estáticas permutadas | **−0,064** prejudica | +0,019 inconclusivo |
+
+RMSE médio no teste (4 trimestres): `base` 2,281 (as árvores: 2,296), `full` 2,575, só o grupo 1 removido 2,719.
+
+**Leitura.** Os dois modelos concordam no essencial: **só o grupo 1 acrescenta informação**, o grupo 3 não traz
+nada e o ruído é zero. A LSTM com o `base` é tão boa quanto as árvores (2,28 contra 2,30) e não ganha com o
+sequencial. Onde divergem: somar o grupo 2 ou o 4 **piora** a LSTM (as árvores ignoram colunas inúteis; a rede
+sobreajusta, com ~5,6 mil linhas de treino por trimestre). O grupo 4 pior que as estáticas permutadas
+(`real_vs_perm_static` −0,168) indica que ela usa o relevo como identificador de estação, e isso não generaliza.
+Importância por permutação no `full`: grupo 1 (1,03) > grupo 4 (0,44) > grupo 2 (0,20) > grupo 3 (0,12), a mesma
+ordem do LightGBM (grupo 1 com 79 % do total nas árvores e 58 % na LSTM; grupo 4 com 13 % e 24 %). **Por coluna
+os dois quase não concordam:** correlação de postos de 0,12 nas 167 colunas e 2 colunas em comum no top 20. O
+LightGBM concentra o peso em `gust10fg` (0,60) e a LSTM o dilui entre as colunas colineares da janela (0,005); 47 %
+das 167 colunas têm efeito < 0,002 na LSTM. A comparação robusta é por grupo, não por coluna (notebook
+`lstm_vs_arvores`). **Ressalvas:** uma seed, hiperparâmetros da pipeline sem ajuste para este estudo;
+"prejudica" aqui é sobreajuste de uma LSTM sem regularização específica, não prova de que os grupos não tenham
+informação. Para decidir, repetir nas 5 seeds (Modal).
+
 ## Purga temporal nas fronteiras de mês
 
 As colunas com defasagem (`*_lag1h`, `*_max_prev3h`, `*_delta3h`, `mslp_tend_3h`) olham para trás e

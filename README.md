@@ -112,6 +112,16 @@ modal run src/modal/feature_study.py --stage add-arms --study <nome>
 modal run src/modal/feature_study.py --stage fit --arms sel__val12 --models top5 --study <nome>
 ```
 
+**LSTM no mesmo estudo** (mesmos arms e linhas; fora do `all`; ver `documentation/09`):
+
+```bash
+uv run python scripts/run_feature_study_local.py run --stage lstm --seeds 42            # ~18 min
+uv run python scripts/run_feature_study_local.py run --stage aggregate-lstm --seeds 42
+# Modal (GPU): piloto com 2 arms antes das 5 seeds
+modal run src/modal/feature_study.py --stage fit-lstm --study <nome> --seeds 42 --arms base,full
+modal run src/modal/feature_study.py --stage aggregate --lstm --study <nome>
+```
+
 Os resultados são lidos pelos notebooks de `notebooks/feature_study_grupos/atual/`. Para regenerá-los
 a partir dos scripts:
 

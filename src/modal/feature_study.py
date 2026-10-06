@@ -80,6 +80,22 @@ image = (
     .add_local_dir(str(_local_root / "src"), remote_path=f"{REMOTE_APP_DIR}/src", copy=True)
 )
 
+# Imagem da LSTM: TensorFlow com GPU. A do estudo tabular não tem TensorFlow, e a da LSTM de
+# produção não tem pyarrow nem lazypredict — por isso uma terceira, só para este estágio.
+lstm_image = (
+    modal.Image.from_registry("tensorflow/tensorflow:2.16.1-gpu")
+    .apt_install("libhdf5-dev", "libnetcdf-dev", "gdal-bin", "libgdal-dev", "libproj-dev")
+    .pip_install(
+        "numpy>=1.24.0", "pandas>=2.0.0", "scikit-learn>=1.6.0", "matplotlib>=3.9.0",
+        "xarray>=2024.1.0", "netCDF4>=1.6.0", "geopandas>=0.14.0", "pyshp>=2.3.0",
+        "scipy>=1.10.0", "shapely>=2.0.0", "pyarrow>=14.0.0", "pyyaml>=6.0.3", "pydantic>=2.13.3",
+    )
+    .pip_install("lazypredict[boost]>=0.3.0", "xgboost>=2.0.0", "lightgbm>=4.0.0")
+    .env({"MPLBACKEND": "Agg", "PYTHONUNBUFFERED": "1", "TF_CPP_MIN_LOG_LEVEL": "2"})
+    .add_local_file(str(_local_root / "main.py"), remote_path=f"{REMOTE_APP_DIR}/main.py", copy=True)
+    .add_local_dir(str(_local_root / "src"), remote_path=f"{REMOTE_APP_DIR}/src", copy=True)
+)
+
 app = modal.App(APP_NAME)
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME)
 dataset_volume = modal.Volume.from_name(DATASET_VOLUME_NAME)
@@ -206,6 +222,39 @@ def fit_unit(tag: str, season: str, arm_names: list[str], models: str = "all",
             "peak_rss_mb": float(per_arm["peak_rss_mb"].max())}
 
 
+@app.function(
+    image=lstm_image, volumes=_VOLUMES, gpu="T4", timeout=7200, memory=12288, cpu=4,
+    max_containers=MAX_CONTAINERS, retries=1,
+)
+def fit_lstm_unit(season: str, arm_names: list[str], seed: int, window_hours: int = 24,
+                  study: str = DEFAULT_STUDY) -> dict:
+    """Um trimestre, uma seed, todos os arms pedidos, com a LSTM — no próprio container.
+
+    Mesma população e mesmos arms do `fit_unit`; a saída vai para `units/<tag>_lstm/`.
+    """
+    _bootstrap()
+    from src.feature_study.core.analysis import load_arms
+    from src.feature_study.core.config import seed_tag
+    from src.feature_study.core.worker_lstm import run_unit_lstm
+
+    artifact_volume.reload()
+    study_dir = _study(study)
+    by_name = {a.name: a for a in load_arms(study_dir / "data")}
+    unknown = [n for n in arm_names if n not in by_name]
+    if unknown:
+        raise ValueError(f"arms desconhecidos: {unknown}")
+    out_tag = seed_tag(seed) + "_lstm"
+
+    t0 = time.time()
+    print(f"[modal] ▶ {out_tag}/{season}: {len(arm_names)} arm(s), janela {window_hours} h, seed={seed}", flush=True)
+    written = run_unit_lstm(study_dir / "data", study_dir, f"{REMOTE_DATASET_DIR}/raw", "full", season,
+                            [by_name[n] for n in arm_names], out_tag=out_tag, seed=seed,
+                            window_hours=window_hours)
+    _commit_safe()
+    print(f"[modal] ✓ {out_tag}/{season} em {time.time() - t0:.0f}s ({len(written)} arquivos)", flush=True)
+    return {"tag": out_tag, "season": season, "arms": arm_names, "seconds": round(time.time() - t0, 1)}
+
+
 def _top5_for(study, season: str) -> list[str]:
     """Lista de modelos do trimestre, lida do JSON congelado pela triagem.
 
@@ -327,6 +376,27 @@ def _run_fit(seeds: list[int], arm_names: list[str], models: str, chunk_size: in
         raise SystemExit(1)
 
 
+def _run_fit_lstm(seeds: list[int], arm_names: list[str], window_hours: int, study: str) -> None:
+    """Uma unidade por (seed × trimestre), com todos os arms no mesmo container: as janelas são
+    lidas uma vez por unidade e reaproveitadas por todos os arms."""
+    seasons = ("DJF", "MAM", "JJA", "SON")
+    args = [(s, arm_names, seed, window_hours, study) for seed in seeds for s in seasons]
+    print(f"\nfit-lstm: {len(args)} container(s) = {len(seeds)} seed(s) {seeds} × {len(seasons)} trimestres, "
+          f"{len(arm_names)} arm(s) cada, janela de {window_hours} h", flush=True)
+    results = list(fit_lstm_unit.starmap(args, order_outputs=False, return_exceptions=True))
+    failed = [r for r in results if isinstance(r, BaseException)]
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    secs = [r["seconds"] for r in ok]
+    print(f"fit-lstm: {len(ok)}/{len(args)} ok"
+          + (f" | container: mediana {sorted(secs)[len(secs) // 2]:.0f}s, "
+             f"total {sum(secs) / 3600:.2f} container-h" if secs else ""), flush=True)
+    if failed:
+        print(f"fit-lstm: {len(failed)} FALHARAM (repita o comando; unidades prontas são puladas):")
+        for f in failed[:5]:
+            print(f"   {type(f).__name__}: {str(f)[:300]}")
+        raise SystemExit(1)
+
+
 def _download(paths: list[str], local_dir: str) -> int:
     vol = modal.Volume.from_name(ARTIFACT_VOLUME_NAME)
     root = Path(local_dir)
@@ -379,9 +449,15 @@ def main(
     local_dir: str = "artifacts",
     triage: bool = False,
     selection: str = "config/selected_features_val12.json",
+    lstm: bool = False,
+    window_hours: int = 24,
 ) -> None:
     """
-    --stage      prepare | add-arms | pilot | fit | screen | aggregate | all
+    --stage      prepare | add-arms | pilot | fit | fit-lstm | screen | aggregate | all
+    --lstm       No `aggregate`: agrega as unidades da LSTM (`<tag>_lstm`) em `summary/lstm`.
+    --window-hours  No `fit-lstm`: janela da LSTM, em horas até a hora do pico (padrão 24).
+                 `fit-lstm` usa a MESMA população e os MESMOS arms do estudo tabular, com a
+                 LSTM no lugar dos modelos; fora do `all`. Rode `--arms` para restringir.
     --selection  JSON congelado da seleção de variáveis (só no add-arms). `add-arms`
                  acrescenta os arms `sel__*` a arms.json SEM refazer o prepare; grátis.
     --arm-sets   anchors,groups,controls (padrão) — só no prepare.
@@ -404,15 +480,18 @@ def main(
                  sobrescreve a leaderboard de 39 modelos do arm base.
     --no-download  Não baixa o resumo
     """
-    if stage not in ("prepare", "add-arms", "pilot", "fit", "screen", "aggregate", "all"):
+    if stage not in ("prepare", "add-arms", "pilot", "fit", "fit-lstm", "screen", "aggregate", "all"):
         raise SystemExit(f"--stage inválido: {stage!r}")
     # `main` roda na máquina local: o pacote `src` precisa estar no caminho.
     root = str(Path(__file__).resolve().parents[2])
     if root not in sys.path:
         sys.path.insert(0, root)
-    from src.feature_study.core.config import MAIN_TAGS, MODEL_SEEDS, triage_tag
-    tag_list = [t for t in tags.split(",") if t] or list(MAIN_TAGS)
+    from src.feature_study.core.config import MAIN_TAGS, MODEL_SEEDS, seed_tag, triage_tag
     seed_list = [int(s) for s in seeds.split(",") if s] or list(MODEL_SEEDS)
+    tag_list = [t for t in tags.split(",") if t] or (
+        [seed_tag(s) + "_lstm" for s in seed_list] if lstm else list(MAIN_TAGS))
+    if lstm and label == "main":
+        label = "lstm"
     # `screen` lê a pasta da TRIAGEM (<tag>_triage) por padrão. Para uma triagem
     # antiga, gravada junto do estudo, passe `--tags` explicitamente.
     screen_tags = [t for t in tags.split(",") if t] or [triage_tag(s) for s in seed_list]
@@ -431,6 +510,14 @@ def main(
     if stage == "add-arms":
         nomes = add_arms_remote.remote((Path(root) / selection).read_text(), study)
         print(f"add-arms ok: {len(nomes)} arms em {STUDY_ROOT}/{study}/data/arms.json: {', '.join(nomes)}")
+
+    if stage == "fit-lstm":
+        all_arms = list_arms.remote(study)
+        chosen = [a for a in arms.split(",") if a] or all_arms
+        unknown = [a for a in chosen if a not in all_arms]
+        if unknown:
+            raise SystemExit(f"arms desconhecidos: {unknown}. Disponíveis: {all_arms}")
+        _run_fit_lstm(seed_list, chosen, window_hours, study)
 
     if stage in ("pilot", "fit", "all"):
         all_arms = list_arms.remote(study)
@@ -461,5 +548,11 @@ def main(
         print(f"{len(created)} arquivo(s) de resumo.")
         if download:
             extra = [f"{STUDY_ROOT}/{study}/data/{f}" for f in ("meta.json", "arms.json")]
+            if lstm:
+                # as unidades da LSTM são pequenas e trazem a importância por grupo/coluna
+                vol = modal.Volume.from_name(ARTIFACT_VOLUME_NAME)
+                for t in tag_list:
+                    extra += [e.path for e in vol.listdir(f"{STUDY_ROOT}/{study}/units/{t}")
+                              if e.path.endswith(".parquet")]
             n = _download(created + extra, local_dir)
             print(f"\n{n} arquivo(s) → {Path(local_dir).resolve()}/{STUDY_ROOT}/{study}")
