@@ -4,7 +4,7 @@
 # entrada, o Kedro trata cada um como MemoryDataset automaticamente, o que já
 # é suficiente pro `kedro viz` desenhar o grafo. As pipelines de verdade fazem
 # sua própria leitura/escrita em disco (raw_dir/output_dir passados como
-# parâmetro — ver conf/base/parameters.yml e src/irc_vendaval_kedro/nodes.py),
+# parâmetro — ver config/base/parameters.yml e src/irc_vendaval_kedro/nodes.py),
 # não passam pelo DataCatalog do Kedro.
 #
 # Exceção: a pipeline `lazy_amostra` (kedro run --pipeline=lazy_amostra) É

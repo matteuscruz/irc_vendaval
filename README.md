@@ -390,7 +390,10 @@ irc_vendaval/
 │   └── visualization/
 │       └── cluster_plots.py
 │
-├── config/                         # YAMLs de experimento (cluster_lstm, schema v2)
+├── config/                         # Toda a configuração
+│   ├── experiment_cluster_lstm_*.yaml  # Experimentos da LSTM (schema v2)
+│   ├── selected_features_val12.json    # Seleção congelada de variáveis (estudo de features)
+│   └── base/                       # Kedro: catalog.yml e parameters.yml
 │
 ├── dataset/
 │   ├── raw/                        # NetCDF: INMET + ERA5

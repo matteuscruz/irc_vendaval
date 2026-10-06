@@ -12,8 +12,9 @@ build/
 .venv/
 .python-version
 
-# Testing
+# Testing e caches de ferramentas
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 catboost_info/
@@ -32,8 +33,7 @@ dataset/*
 # "adding embedded git repository"); se algum dia precisar deles versionados
 # aqui de verdade, usar `git submodule add`, não commitar direto.
 scrollytelling/
-research/GFS-NWP-Wind-Correction/
-research/TRWindBC/
+research/
 extreme_winds_doc_paper/
 
 # IDE
@@ -59,3 +59,7 @@ notebooks/
 # Claude
 .claude/
 
+# Saídas e pastas geradas, nunca versionadas
+reports/
+models/
+figs/
