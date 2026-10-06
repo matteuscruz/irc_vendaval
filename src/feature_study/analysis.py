@@ -32,8 +32,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
-from src.feature_study.arms import Arm, extra_comparisons
+from src.feature_study.arms import SELECTION_AXIS, SELECTION_EXTRA, Arm, extra_comparisons
 from src.feature_study.config import (
     BOOTSTRAP_DRAWS, BOOTSTRAP_SEED, CHAMPION_SLACK, LOSS_MODELS, MODEL_FAMILY,
     PRIMARY_METRIC, REFERENCE_MODELS, SESOI_REL,
@@ -52,6 +53,20 @@ def load_arms(data_dir) -> list[Arm]:
 
 def load_test(data_dir) -> pd.DataFrame:
     return pd.read_parquet(Path(data_dir) / "test.parquet").sort_values("row_id").reset_index(drop=True)
+
+
+def discover_models(out_dir, tags) -> list[str]:
+    """Modelos que têm resíduo gravado — a união das colunas de `resid__*.parquet`.
+
+    É o que permite ao modo top-5 medir os modelos que a triagem de fato elegeu
+    (MLP, GradientBoosting, BayesianRidge…), em vez de só os `REFERENCE_MODELS`.
+    Num estudo com os 7 de referência a união é exatamente esses 7."""
+    achados: set[str] = set()
+    for tag in tags:
+        for path in (Path(out_dir) / "units" / tag).glob("resid__*.parquet"):
+            achados |= set(pq.ParquetFile(path).schema_arrow.names)
+    achados.discard("row_id")
+    return sorted(achados)
 
 
 def load_residuals(out_dir, tags, arm_names, test: pd.DataFrame, models=REFERENCE_MODELS) -> dict:
@@ -86,19 +101,41 @@ class Blocks:
     syy_b: np.ndarray
 
 
-def make_blocks(test: pd.DataFrame) -> Blocks:
+def make_blocks(test: pd.DataFrame, mask: np.ndarray | None = None) -> Blocks:
+    """Somas por bloco (ano, mês). Com `mask`, só as linhas marcadas contam.
+
+    Os ids de bloco são SEMPRE os globais, mesmo com máscara: o sorteio de blocos
+    do bootstrap é um só para todos os modelos, e é isso que mantém o pareamento.
+    Um bloco sem linhas mascaradas fica com contagem zero.
+
+    A máscara existe porque, com a triagem top-5, cada modelo só tem resíduo nos
+    trimestres em que foi eleito. Exigir cobertura total deixava um único modelo
+    (a interseção dos quatro trimestres) e escondia o efeito dos demais."""
     key = test["year"].astype(int).to_numpy() * 100 + test["month"].astype(int).to_numpy()
     ids, uniq = pd.factorize(key)
     nb = len(uniq)
     y = test[TARGET_VAR].to_numpy(float)
-    tail = y >= np.quantile(y, 0.9)
+    m = np.ones(len(y), bool) if mask is None else np.asarray(mask, bool)
+    tail = (y >= np.quantile(y[m], 0.9)) & m
     return Blocks(
         ids=ids, nb=nb, tail=tail,
-        n_b=np.bincount(ids, minlength=nb).astype(float),
+        n_b=np.bincount(ids[m], minlength=nb).astype(float),
         nt_b=np.bincount(ids[tail], minlength=nb).astype(float),
-        sy_b=np.bincount(ids, weights=y, minlength=nb),
-        syy_b=np.bincount(ids, weights=y * y, minlength=nb),
+        sy_b=np.bincount(ids[m], weights=y[m], minlength=nb),
+        syy_b=np.bincount(ids[m], weights=y[m] * y[m], minlength=nb),
     )
+
+
+def _masked_draws(counts, e, test, cache: dict):
+    """Métricas (por sorteio) de um vetor de resíduo nas linhas em que ele existe.
+    Devolve `(draws, mask)` ou `None` se o vetor não tem nenhuma linha."""
+    mask = np.isfinite(e)
+    if not mask.any():
+        return None
+    k = mask.tobytes()
+    if k not in cache:
+        cache[k] = make_blocks(test, mask)
+    return _draw_metrics(counts, np.where(mask, e, 0.0), cache[k]), mask
 
 
 def _block_sums(e: np.ndarray, b: Blocks) -> np.ndarray:
@@ -157,9 +194,12 @@ def comparisons(arms: list[Arm], available: set[str]) -> list[tuple[str, str, st
 def compute_effects(
     out_dir, data_dir, tags, arms: list[Arm] | None = None,
     n_boot: int = BOOTSTRAP_DRAWS, seed: int = BOOTSTRAP_SEED,
-    models=REFERENCE_MODELS,
+    models=None,
 ) -> pd.DataFrame:
-    """Tabela de efeitos pareados, por comparação × família × métrica."""
+    """Tabela de efeitos pareados, por comparação × família × métrica.
+
+    `models=None` mede todos os modelos com resíduo gravado (`discover_models`)."""
+    models = discover_models(out_dir, tags) if models is None else list(models)
     arms = arms or load_arms(data_dir)
     test = load_test(data_dir)
     blocks = make_blocks(test)
@@ -167,7 +207,7 @@ def compute_effects(
     resid = load_residuals(out_dir, tags, arm_names, test, models)
 
     have = {a for a in arm_names
-            if any(np.isfinite(resid[(t, a, m)]).all() for t in tags for m in models)}
+            if any(np.isfinite(resid[(t, a, m)]).any() for t in tags for m in models)}
     comps = comparisons(arms, have)
     if not comps:
         raise ValueError("nenhuma comparação disponível — faltam resíduos dos arms")
@@ -179,12 +219,12 @@ def compute_effects(
     ])
 
     cache: dict = {}
+    blocos_por_mascara: dict = {}
 
     def metrics_of(tag, arm, model):
         k = (tag, arm, model)
         if k not in cache:
-            e = resid[k]
-            cache[k] = _draw_metrics(counts, e, blocks) if np.isfinite(e).all() else None
+            cache[k] = _masked_draws(counts, resid[k], test, blocos_por_mascara)
         return cache[k]
 
     families = sorted({MODEL_FAMILY.get(m, "other") for m in models}) + ["all"]
@@ -195,10 +235,19 @@ def compute_effects(
             for t in tags:
                 for m in models:
                     w, bt = metrics_of(t, worse, m), metrics_of(t, better, m)
-                    if w is not None and bt is not None:
-                        per[(t, m)] = _delta(metric, w[metric], bt[metric])
+                    # os dois lados têm de cobrir EXATAMENTE as mesmas linhas;
+                    # senão a diferença misturaria trimestres diferentes
+                    if w is not None and bt is not None and np.array_equal(w[1], bt[1]):
+                        per[(t, m)] = _delta(metric, w[0][metric], bt[0][metric])
             for fam in families:
-                keep = {k: v for k, v in per.items() if fam == "all" or MODEL_FAMILY.get(k[1]) == fam}
+                # O default TEM de ser o mesmo dos dois lados: `families` acima
+                # usa `.get(m, "other")`, então sem o default aqui um modelo
+                # fora de MODEL_FAMILY nunca casaria com a própria linha
+                # `family="other"` — ela sairia vazia, em silêncio. Latente no
+                # conjunto fixo de referência; real com o top-5 dinâmico, onde
+                # GradientBoosting/Bagging/AdaBoost são candidatos.
+                keep = {k: v for k, v in per.items()
+                        if fam == "all" or MODEL_FAMILY.get(k[1], "other") == fam}
                 if not keep:
                     continue
                 by_tag = {}
@@ -219,6 +268,11 @@ def compute_effects(
                     "ci_lo": point - 1.96 * se, "ci_hi": point + 1.96 * se,
                     "z": z, "p": math.erfc(abs(z) / math.sqrt(2)) if np.isfinite(z) else float("nan"),
                     "n_replicates": r, "n_models": len({k[1] for k in keep}),
+                    # Cada trimestre testa num ÚNICO mês, então são ~24 blocos
+                    # (um por ano). Com tão poucas unidades independentes o IC
+                    # é estreito por construção e tende a ser anticonservador —
+                    # quem lê o intervalo precisa ver de quantos blocos ele veio.
+                    "n_blocos": blocks.nb,
                 })
     eff = pd.DataFrame(rows)
 
@@ -226,6 +280,7 @@ def compute_effects(
     # sempre do eixo de features.
     axis_of = {a.name: a.axis for a in arms}
     eff["axis"] = eff["comparison"].map(axis_of).fillna("features")
+    eff.loc[eff["comparison"].isin(SELECTION_EXTRA), "axis"] = SELECTION_AXIS
     anchor_of = {a.name: a.reference for a in arms}
 
     eff["q_bh"] = np.nan
@@ -237,7 +292,7 @@ def compute_effects(
         # arm de referência. O eixo de features mantém ("base", "rmse") — é o
         # que preserva os valores já publicados.
         anchors = {anchor_of.get(c) or "base" for c in grupo["comparison"]}
-        escala = np.mean([v for v in (_anchor_metric(counts, blocks, resid, tags, models, a, metric)
+        escala = np.mean([v for v in (_anchor_metric(counts, test, blocos_por_mascara, resid, tags, models, a, metric)
                                       for a in sorted(anchors)) if np.isfinite(v)] or [np.nan])
         eff.loc[grupo.index, "sesoi"] = SESOI_REL * escala if np.isfinite(escala) else np.nan
 
@@ -252,14 +307,15 @@ def compute_effects(
     return eff
 
 
-def _anchor_metric(counts, blocks, resid, tags, models, arm, metric="rmse") -> float:
+def _anchor_metric(counts, test, cache, resid, tags, models, arm, metric="rmse") -> float:
     """Escala do arm de referência na métrica com que o eixo é julgado."""
     vals = []
     for t in tags:
         for m in models:
             e = resid.get((t, arm, m))
-            if e is not None and np.isfinite(e).all():
-                vals.append(_draw_metrics(counts[:1], e, blocks)[metric][0])
+            r = None if e is None else _masked_draws(counts[:1], e, test, cache)
+            if r is not None:
+                vals.append(r[0][metric][0])
     return float(np.mean(vals)) if vals else float("nan")
 
 
@@ -396,12 +452,13 @@ def champion_rules(out_dir, tags, slack: float = CHAMPION_SLACK) -> tuple[pd.Dat
     return picks, resumo
 
 
-def effects_by_season(out_dir, data_dir, tags, arms=None, models=REFERENCE_MODELS) -> pd.DataFrame:
+def effects_by_season(out_dir, data_dir, tags, arms=None, models=None) -> pd.DataFrame:
     """Ganho de RMSE por trimestre (só ponto, sem IC — poucos blocos por trimestre)."""
+    models = discover_models(out_dir, tags) if models is None else list(models)
     arms = arms or load_arms(data_dir)
     test = load_test(data_dir)
     resid = load_residuals(out_dir, tags, [a.name for a in arms], test, models)
-    have = {a.name for a in arms if any(np.isfinite(resid[(t, a.name, m)]).all() for t in tags for m in models)}
+    have = {a.name for a in arms if any(np.isfinite(resid[(t, a.name, m)]).any() for t in tags for m in models)}
     rows = []
     for name, worse, better in comparisons(arms, have):
         for season in sorted(test["season"].unique()):
@@ -449,8 +506,8 @@ def ranking_features(effects: pd.DataFrame, arms: list[Arm]) -> pd.DataFrame:
 
 def ranking_groups(effects: pd.DataFrame) -> pd.DataFrame:
     e = effects[(effects["metric"] == "rmse") & (effects["family"] == "all")]
-    keep = e[e["comparison"].str.startswith(("add_grp__", "drop_grp__", "ctrl__"))
-             | e["comparison"].isin(["real_vs_perm_static", "full_vs_base"])]
+    keep = e[e["comparison"].str.startswith(("add_grp__", "drop_grp__", "ctrl__", "sel__"))
+             | e["comparison"].isin(["real_vs_perm_static", "full_vs_base", *SELECTION_EXTRA])]
     return keep[["comparison", "effect", "ci_lo", "ci_hi", "q_bh", "sesoi", "verdict"]].reset_index(drop=True)
 
 
@@ -514,6 +571,121 @@ def champions(out_dir, tags) -> pd.DataFrame:
     val = val.assign(**{f"test_{c}": [test.loc[(r.arm, r.season, r.model), c] if (r.arm, r.season, r.model) in test.index else np.nan
                                       for r in val.itertuples()] for c in ("R2", "RMSE", "Bias_P90", "RMSE_P90")})
     return val[["arm", "season", "model", "R2", "test_R2", "test_RMSE", "test_Bias_P90", "test_RMSE_P90"]].rename(columns={"R2": "val_R2"})
+
+
+# Dois modelos cujas métricas de VALIDAÇÃO diferem menos que isto são tratados
+# como o mesmo: `LinearRegression`, `Ridge`, `RidgeCV` e `TransformedTargetRegressor`
+# (que por padrão é uma regressão linear) saem com R² e RMSE_P90 idênticos até a
+# terceira casa, e ocupavam quatro das cinco vagas de JJA.
+EQUIV_TOL_R2 = 0.002
+EQUIV_TOL_P90 = 0.01
+
+
+def top_models_by_season(
+    out_dir, tags, *, arm: str = "base", k: int = 5,
+    slack: float = CHAMPION_SLACK, split_select: str = "val",
+    equiv_tol_r2: float = EQUIV_TOL_R2, equiv_tol_p90: float = EQUIV_TOL_P90,
+) -> pd.DataFrame:
+    """Os `k` melhores modelos POR TRIMESTRE, sobre um único arm.
+
+    É a triagem que substitui rodar os 39 regressores em todos os arms. A regra
+    é a mesma de `champion_rules["r2_slack_then_rmse_p90"]`, só que devolvendo
+    `k` em vez de 1: entre os que estão a até `slack` do melhor R², ordena por
+    RMSE_P90 crescente. Maximizar R² sozinho prefere o modelo mais comprimido,
+    que é o oposto do que um produto de extremos precisa; a folga evita o
+    extremo oposto, de eleger uma cauda boa com R² negativo.
+
+    Escolha SEMPRE na validação (`split_select`), métricas de teste apenas
+    REPORTADAS ao lado — escolher no teste seria medir o próprio teste.
+
+    Sobre a mudança metodológica: `config.py` documenta a decisão de FIXAR os
+    modelos a priori, porque escolher o top-K pelo arm base geraria regressão à
+    média contra as features. Isso continua valendo para `REFERENCE_MODELS`.
+    Aqui o desenho é outro e a condição do bootstrap é preservada: o MESMO
+    conjunto de `k` vale para todos os arms daquele trimestre, então o
+    pareamento de `compute_effects` (mesmo modelo, trimestre e seed dos dois
+    lados) continua intacto. O que se perde é a garantia de que a lista não foi
+    tocada pelos dados — o viés resultante é CONSERVADOR contra as features
+    novas, já que um modelo que só brilhasse COM elas nunca é visto.
+    """
+    lb = models_leaderboard(out_dir, tags)
+    if lb.empty:
+        return pd.DataFrame()
+
+    sel = lb[(lb["arm"] == arm) & (lb["split"] == split_select)].dropna(subset=["R2", "RMSE_P90"])
+    # Modelo que divergiu em qualquer seed não entra na triagem: ele voltaria a
+    # divergir nos outros arms e levaria um resultado inteiro consigo.
+    sel = sel[sel["n_nonfinite"] == 0]
+    if sel.empty:
+        return pd.DataFrame()
+    teste = lb[(lb["arm"] == arm) & (lb["split"] == "test")].set_index(["season", "model"])
+    sd = seed_sensitivity(out_dir, tags)
+    sd_of = sd.set_index("model")["sd_rmse_mean"].to_dict() if not sd.empty else {}
+
+    linhas = []
+    for season, g in sel.groupby("season"):
+        elegiveis = g[g["R2"] >= g["R2"].max() - slack].sort_values("RMSE_P90")
+        # Se a folga admitir menos que `k`, completa por R² — melhor um quinto
+        # modelo medíocre do que um trimestre com menos modelos que os outros,
+        # o que desbalancearia a média por trimestre da análise.
+        candidatos = list(elegiveis["model"])
+        resto = g[~g["model"].isin(candidatos)].sort_values("R2", ascending=False)
+        candidatos += list(resto["model"])
+
+        # Modelos equivalentes contam UMA vez. Sem isto, cinco vagas podem ser
+        # duas ideias: o conjunto de "5 modelos" inflaria `n_models` e a
+        # diversidade que motivou a triagem não existiria.
+        por_modelo = g.set_index("model")[["R2", "RMSE_P90"]]
+        escolhidos, omitidos = [], {}
+        for modelo in candidatos:
+            r2, p90 = por_modelo.loc[modelo, "R2"], por_modelo.loc[modelo, "RMSE_P90"]
+            gemeo = next((e for e in escolhidos
+                          if abs(por_modelo.loc[e, "R2"] - r2) <= equiv_tol_r2
+                          and abs(por_modelo.loc[e, "RMSE_P90"] - p90) <= equiv_tol_p90), None)
+            if gemeo is not None:
+                omitidos.setdefault(gemeo, []).append(modelo)
+            else:
+                escolhidos.append(modelo)
+            if len(escolhidos) == k:
+                break
+        for rank, modelo in enumerate(escolhidos, start=1):
+            linha_val = g[g["model"] == modelo].iloc[0]
+            t = teste.loc[(season, modelo)] if (season, modelo) in teste.index else None
+            linhas.append({
+                "season": season, "rank": rank, "model": modelo,
+                "R2_val": float(linha_val["R2"]), "RMSE_P90_val": float(linha_val["RMSE_P90"]),
+                "R2_test": float(t["R2"]) if t is not None else np.nan,
+                "RMSE_test": float(t["RMSE"]) if t is not None else np.nan,
+                "RMSE_P90_test": float(t["RMSE_P90"]) if t is not None else np.nan,
+                # Gap val→teste: com ~680 colunas e 9 estações os controles
+                # negativos detectam ganho espúrio de FEATURE, não sobreajuste
+                # global. Este gap é o termômetro que falta.
+                "gap_R2_val_test": float(linha_val["R2"] - t["R2"]) if t is not None else np.nan,
+                "n_seeds": len(tags),
+                "sd_RMSE_seeds": float(sd_of.get(modelo, 0.0)),
+                "equivalentes_omitidos": ", ".join(omitidos.get(modelo, [])),
+            })
+    return pd.DataFrame(linhas).sort_values(["season", "rank"]).reset_index(drop=True)
+
+
+def top_models_payload(top: pd.DataFrame, *, arm="base", k=5, slack=CHAMPION_SLACK,
+                       tags=(), split_select="val") -> dict:
+    """JSON congelado da triagem — é ele que viaja até os containers do `fit`.
+
+    Congelar em vez de recalcular é deliberado: se cada unidade refizesse a
+    escolha, uma seed a mais no volume mudaria o conjunto de modelos no meio do
+    fan-out e metade dos arms sairia com modelos diferentes da outra metade.
+    """
+    from src.feature_study.worker import _models_fingerprint
+
+    by_season = {s: list(g.sort_values("rank")["model"]) for s, g in top.groupby("season")}
+    todos = sorted({m for ms in by_season.values() for m in ms})
+    return {
+        "schema": 1, "arm": arm, "k": k, "slack": slack,
+        "rule": "r2_slack_then_rmse_p90", "split_select": split_select,
+        "tags": list(tags), "models_fp": _models_fingerprint(todos),
+        "by_season": by_season,
+    }
 
 
 def compare_units(out_dir, tag_a: str, tag_b: str) -> float:

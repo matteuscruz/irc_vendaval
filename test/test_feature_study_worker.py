@@ -15,13 +15,20 @@ from sklearn.linear_model import Ridge
 
 from src.feature_study.analysis import compare_units
 from src.feature_study.arms import Arm
+from src.feature_study.worker import _features_fingerprint
 from src.feature_study.config import (
     LOSS_MODELS, MAIN_TAGS, MODEL_SEED, MODEL_SEEDS, seed_tag,
 )
-from src.feature_study.worker import fit_arm, load_unit_frames, run_unit, select_regressors
+from src.feature_study.worker import (
+    _models_fingerprint, fit_arm, load_unit_frames, run_unit, select_regressors,
+)
 from src.pipelines.common import TARGET_VAR
 
 REGS = [Ridge, ExtraTreesRegressor]
+# Conjunto custom de modelos carimba `custom:<impressão digital do conjunto>`,
+# não a string literal `"custom"`: dois conjuntos diferentes precisam de
+# `models_mode` diferentes, senão o `skip_existing` reaproveita o ajuste errado.
+MODO_CUSTOM = "custom:" + _models_fingerprint(REGS)
 
 
 def _frame(n, split, seasons=("DJF",), seed=0):
@@ -135,8 +142,12 @@ def test_unit_writes_deterministic_files_and_is_idempotent(data_dir, tmp_path):
     out = tmp_path / "out"
     first = run_unit(data_dir, out, "r0", "DJF", [ARM_BASE, ARM_FULL], regressors=REGS)
     names = sorted(p.name for p in first)
+    # `preds__*` só sai para os arms de PRED_DUMP_ARMS (base e full), e é o
+    # insumo da série temporal e do mapa espacial por estação.
     assert names == ["metrics__DJF__base.parquet", "metrics__DJF__full.parquet",
+                     "preds__DJF__base.parquet", "preds__DJF__full.parquet",
                      "resid__DJF__base.parquet", "resid__DJF__full.parquet"]
+    assert first[0].name.startswith("metrics__")        # contrato: métricas primeiro
 
     mtimes = {p: p.stat().st_mtime_ns for p in first}
     run_unit(data_dir, out, "r0", "DJF", [ARM_BASE, ARM_FULL], regressors=REGS)
@@ -154,7 +165,7 @@ def test_existing_units_from_another_model_set_are_refit_not_skipped(data_dir, t
     out = tmp_path / "out"
     written = run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)
     m_path = written[0]
-    assert (pd.read_parquet(m_path)["models_mode"] == "custom").all()
+    assert (pd.read_parquet(m_path)["models_mode"] == MODO_CUSTOM).all()
 
     # Simula o arquivo do piloto: mesmo nome, outro conjunto de modelos.
     old = pd.read_parquet(m_path).assign(models_mode="fast3")
@@ -163,7 +174,7 @@ def test_existing_units_from_another_model_set_are_refit_not_skipped(data_dir, t
 
     run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)
     assert m_path.stat().st_mtime_ns != before                       # refez
-    assert (pd.read_parquet(m_path)["models_mode"] == "custom").all()
+    assert (pd.read_parquet(m_path)["models_mode"] == MODO_CUSTOM).all()
 
     # Arquivo antigo, sem a coluna (gerado antes da regra), também é refeito.
     pd.read_parquet(m_path).drop(columns=["models_mode"]).to_parquet(m_path, index=False)
@@ -201,8 +212,11 @@ def test_select_regressors_modes_and_errors():
 def test_prepare_end_to_end_on_the_synthetic_cluster(synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
     from src.feature_study.prepare import prepare
 
+    # `core` (= anchors + singles) explícito: este teste cobre a varredura
+    # individual, que deixou de entrar por omissão.
     meta = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "study",
-                   eps=0.15, seeds=(1, 2), pilot_sizes=(60,), cluster_id=9)
+                   eps=0.15, seeds=(1, 2), pilot_sizes=(60,), cluster_id=9,
+                   arm_sets=("core", "groups", "controls"))
     data = tmp_path / "study" / "data"
 
     for f in ("meta.json", "arms.json", "test.parquet", "sample_full.parquet", "sample_r0.parquet",
@@ -330,8 +344,8 @@ def test_a_parquet_from_before_the_loss_column_is_still_considered_current(data_
     antigo = pd.read_parquet(m_path).drop(columns=["loss"])
     antigo.to_parquet(m_path, index=False)
 
-    assert _is_current(m_path, "custom", 42, "mse")
-    assert not _is_current(m_path, "custom", 42, "exp90")
+    assert _is_current(m_path, MODO_CUSTOM, 42, "mse")
+    assert not _is_current(m_path, MODO_CUSTOM, 42, "exp90")
 
 
 def test_two_different_losses_do_not_skip_each_other(data_dir, tmp_path):
@@ -342,8 +356,8 @@ def test_two_different_losses_do_not_skip_each_other(data_dir, tmp_path):
     out = tmp_path / "out"
     m_path = run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)[0]
 
-    assert _is_current(m_path, "custom", 42, "mse")
-    assert not _is_current(m_path, "custom", 42, "huber44")
+    assert _is_current(m_path, MODO_CUSTOM, 42, "mse")
+    assert not _is_current(m_path, MODO_CUSTOM, 42, "huber44")
 
 
 def test_each_arm_gets_the_regressors_of_its_own_loss(data_dir, tmp_path):
@@ -411,3 +425,134 @@ def test_the_loss_axis_runs_end_to_end_from_prepare_to_aggregate(
     julgado = eff[eff["verdict"] != ""].groupby("axis")["metric"].unique()
     assert set(julgado["features"]) == {"rmse"} and set(julgado["loss"]) == {"rmse_p90"}
     assert eff.groupby("axis")["sesoi"].nunique().eq(1).all()
+
+
+# ── Fingerprint de features (protege contra reuso indevido) ─────────────────
+
+def test_the_same_arm_name_with_a_different_feature_set_is_refit_not_reused(data_dir, tmp_path):
+    """O caso real que motivou isto: uma nova rodada de `prepare` engorda o
+    `full` (mais colunas em `new_features`) sem trocar o NOME do arm. Sem o
+    fingerprint, `_is_current` reaproveitaria em silêncio um ajuste feito com
+    as features ANTIGAS — 20 dos 37 arms do estudo real caem nesse caso."""
+    out = tmp_path / "out"
+    written = run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)
+    m_path, before = written[0], written[0].stat().st_mtime_ns
+
+    # Mesmas colunas de ARM_FULL, só em outra ordem: o fingerprint (que ordena
+    # antes de gerar o hash) tem de ver isso como o MESMO arm — não é a ordem
+    # que caracteriza uma mudança de composição, é o conjunto.
+    full_reordenado = Arm("full", ("f_util", "f_ruido"), "full", "core")
+    run_unit(data_dir, out, "r0", "DJF", [full_reordenado], regressors=REGS)
+    assert m_path.stat().st_mtime_ns == before
+
+    # Mesmo NOME ("full"), composição REALMENTE diferente — o caso real do
+    # estudo, em que uma nova rodada de `prepare` engorda `full`.
+    full_menor = Arm("full", ("f_ruido",), "full", "core")
+    run_unit(data_dir, out, "r0", "DJF", [full_menor], regressors=REGS)
+    assert m_path.stat().st_mtime_ns != before
+    assert (pd.read_parquet(m_path)["features_fp"] ==
+            _features_fingerprint(("f_ruido",))).all()
+
+
+def test_a_parquet_from_before_the_features_fingerprint_is_not_considered_current(data_dir, tmp_path):
+    """Diferente do caso de `loss` (ausência = "mse", por construção): aqui não
+    existe um valor seguro para assumir em arquivo antigo — foi exatamente uma
+    mudança de composição sem aviso que motivou criar a coluna. Ausente ⇒
+    refaz, sempre."""
+    from src.feature_study.worker import _is_current
+
+    out = tmp_path / "out"
+    m_path = run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)[0]
+    antigo = pd.read_parquet(m_path).drop(columns=["features_fp"])
+    antigo.to_parquet(m_path, index=False)
+
+    fp = _features_fingerprint(ARM_FULL.features)
+    assert not _is_current(m_path, MODO_CUSTOM, 42, "mse", fp)
+
+
+def test_features_fingerprint_is_stable_and_order_independent():
+    a = _features_fingerprint(("nf_fg10_max", "nf_cape_max", "wind_mag"))
+    b = _features_fingerprint(("wind_mag", "nf_fg10_max", "nf_cape_max"))
+    c = _features_fingerprint(("nf_fg10_max", "nf_cape_max"))
+
+    assert a == b
+    assert a != c
+    assert _features_fingerprint(a.split()) == _features_fingerprint(a.split())  # determinístico
+
+
+def test_hourly_source_is_opt_in_via_arm_sets(synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
+    """`"hourly" not in arm_sets` (o padrão) tem de dar a MESMA população de
+    antes da fonte horária existir — é o que permite escolher diário ou
+    diário+horário e comparar as duas rodadas."""
+    from conftest import build_synthetic_hourly_file
+    from src.feature_study.prepare import prepare
+
+    build_synthetic_hourly_file(synthetic_nf_raw_dir)   # arquivo presente no disco
+
+    so_diario = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "diario", cluster_id=9)
+    com_horario = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "horario",
+                          cluster_id=9, arm_sets=("core", "groups", "controls", "hourly"))
+
+    horarias = {f for f in com_horario["new_features"] if f.startswith("nf_h_")}
+    assert horarias                                                        # a fonte entrou
+    assert not any(f.startswith("nf_h_") for f in so_diario["new_features"])  # sem o token, nem lida
+    assert set(so_diario["new_features"]) < set(com_horario["new_features"])
+    assert set(com_horario["new_features"]) - set(so_diario["new_features"]) == horarias
+
+    arms_horario = json.loads((tmp_path / "horario" / "data" / "arms.json").read_text())
+    assert {"add_grp__hourly", "drop_grp__hourly"} <= {a["name"] for a in arms_horario}
+    arms_diario = json.loads((tmp_path / "diario" / "data" / "arms.json").read_text())
+    assert not any("hourly" in a["name"] for a in arms_diario)
+
+
+def test_hourly_only_replaces_the_grid_pool_instead_of_adding_to_it(
+    synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path,
+):
+    """`hourly_only` responde uma pergunta diferente de `hourly`: "o horário
+    SOZINHO ajuda?", não "ajuda além do que já temos?" — só `nf_h_*` no pool
+    de features novas, a base de 40 continua intocada."""
+    from conftest import build_synthetic_hourly_file
+    from src.feature_study.prepare import prepare
+
+    build_synthetic_hourly_file(synthetic_nf_raw_dir)
+
+    so_horario = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "so_horario",
+                         cluster_id=9, arm_sets=("core", "groups", "controls", "hourly_only"))
+
+    assert so_horario["new_features"]                                     # não ficou vazio
+    assert all(f.startswith("nf_h_") for f in so_horario["new_features"])  # só horárias
+    assert len(so_horario["base_features"]) == 40                          # base intocada
+
+    full = pd.read_parquet(tmp_path / "so_horario" / "data" / "sample_full.parquet")
+    grade_presente = [c for c in full.columns if c.startswith("nf_") and not c.startswith("nf_h_")]
+    assert not grade_presente   # as nf_* da grade não entram nem como coluna descartável
+
+
+def test_hourly_and_hourly_only_together_is_a_contradiction(synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
+    from conftest import build_synthetic_hourly_file
+    from src.feature_study.prepare import prepare
+
+    build_synthetic_hourly_file(synthetic_nf_raw_dir)
+    with pytest.raises(ValueError, match="exclusivos"):
+        prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "out",
+               cluster_id=9, arm_sets=("core", "hourly", "hourly_only"))
+
+
+def test_triage_and_study_never_share_an_output_folder(data_dir, tmp_path):
+    """Triagem (39 modelos) e estudo (5) gravam o MESMO nome de arquivo para o
+    arm `base`. Na mesma pasta, o estudo sobrescrevia a leaderboard da triagem —
+    acontecido de verdade no `cluster3_raw` — e rodar o `screen` depois escolhia
+    entre os 5 que já tinham sido escolhidos (um top-5 encolheu para 4)."""
+    from src.feature_study.config import seed_tag, triage_tag
+
+    assert triage_tag(42) != seed_tag(42) and triage_tag(43) != seed_tag(43)
+
+    out = tmp_path / "out"
+    triagem = run_unit(data_dir, out, "r0", "DJF", [ARM_BASE], regressors=[Ridge, ExtraTreesRegressor],
+                       out_tag=triage_tag(42))[0]
+    antes = pd.read_parquet(triagem).model.nunique()
+
+    run_unit(data_dir, out, "r0", "DJF", [ARM_BASE], regressors=[Ridge], out_tag=seed_tag(42))
+
+    depois = pd.read_parquet(triagem)
+    assert depois.model.nunique() == antes == 2              # a triagem continua com os dois modelos

@@ -395,3 +395,194 @@ def new_features_to_points(
         if "time" not in pts[v].dims:
             pts[v] = pts[v].expand_dims(time=times)
     return pts.transpose("time", point_dim)
+
+
+# ── Modo horário achatado (estudo RAW) ──────────────────────────────────────
+#
+# RAMO ADITIVO. O caminho diário acima é o default e não muda uma linha: todas
+# as pipelines de produção (cluster_lazy/mlp/lstm) dependem dele.
+#
+# A diferença é ONDE a agregação deixa de existir. O caminho diário lê horário
+# e reduz com `_daily` (mean/max/std). Aqui nada é reduzido: extraímos a grade
+# nas estações ainda na resolução horária e entregamos as 24 horas do dia como
+# 24 COLUNAS (`hfn_<var>_h<HH>`), para o estudo de features RAW. A motivação é
+# a investigação de DJF: `mean`/`max` apagam o perfil intradiário, que é o que
+# separa rajada convectiva de evento sinótico.
+
+HOURLY_FLAT_CACHE = "_hourly_flat_cache.parquet"
+
+
+def _region_hourly_flat(region: Path, basin_path: Path, stations: pd.DataFrame,
+                        interp_method: str = "bilinear") -> pd.DataFrame | None:
+    """Uma linha por (estação, dia) com 24 colunas por variável da região.
+
+    Reusa integralmente a disciplina do caminho diário: `_RegionGrid` valida
+    que a grade é recorte do Basin e mascara fora da bacia, `_complete_days`
+    decide quais variáveis têm cobertura suficiente (e descarta inteira a que
+    não tem, sem imputar), e as `WIND_PAIRS` viram magnitude ANTES de qualquer
+    coisa — `hypot` calculado hora a hora, nunca a partir de médias diárias,
+    que dariam outro número.
+    """
+    from src.feature_study.hourly_flat import HOURLY_FLAT_NEW_PREFIX, flatten_hourly
+
+    sl = _yearly_files(region / "sl")
+    first = next((p for years in sl.values() for p in years.values()), None)
+    if first is None:
+        return None
+    with _open(first) as sample:
+        grid = _RegionGrid(region, basin_path, sample)
+
+    sources: dict[str, dict[int, Path]] = {}
+    for prefix, years in sl.items():
+        with _open(next(iter(years.values()))) as ds:
+            sources[_single_var(ds, region / "sl" / prefix)] = years
+
+    completas, ref_days = _usable_variables(sources, grid)
+    if not completas:
+        return None
+
+    indexer = build_point_indexer(
+        grid.lat, grid.lon,
+        stations["latitude"].to_numpy(), stations["longitude"].to_numpy(), interp_method,
+    )
+    ids = stations["estacao"].astype(str).to_numpy()
+    pares = {c for u, v, _ in WIND_PAIRS.values() if {u, v} <= completas for c in (u, v)}
+
+    partes: list[pd.DataFrame] = []
+    for year in sorted({y for v in completas for y in sources[v]}):
+        horario: dict[str, xr.DataArray] = {}
+        for var in sorted(completas):
+            caminho = sources[var].get(year)
+            if caminho is not None:
+                with _open(caminho) as ds:
+                    horario[var] = grid.align(ds[var].load(), caminho)
+        if not horario:
+            continue
+        campos = {v: da for v, da in horario.items() if v not in pares}
+        for nome, (u, v, _) in WIND_PAIRS.items():
+            if u in horario and v in horario:
+                campos[nome] = np.hypot(horario[u], horario[v])
+        if all(c in horario for c in ("u10", "v10", "u100", "v100")):
+            campos["shear_100_10"] = np.hypot(
+                horario["u100"] - horario["u10"], horario["v100"] - horario["v10"],
+            )
+        partes.append(_flatten_points(campos, grid, indexer, ids, flatten_hourly, HOURLY_FLAT_NEW_PREFIX))
+
+    if not partes:
+        return None
+    out = pd.concat(partes, ignore_index=True)
+    return out[out["time"].isin(ref_days)].reset_index(drop=True)
+
+
+def _usable_variables(sources: dict[str, dict[int, Path]], grid: "_RegionGrid"):
+    """(variáveis com cobertura completa, dias de referência). Mesma regra do
+    caminho diário: quem não cobre os mesmos dias que as demais é descartada
+    inteira, com aviso — nunca preenchida."""
+    dias: dict[str, set[pd.Timestamp]] = {}
+    for var, years in sources.items():
+        ok: set[pd.Timestamp] = set()
+        for path in years.values():
+            with _open(path) as ds:
+                ok |= _complete_days(grid.align(ds[var].load(), path), grid.mask)
+        dias[var] = ok
+    if not dias:
+        return set(), pd.DatetimeIndex([])
+    referencia = set().union(*dias.values())
+    completas = set()
+    for var, ok in dias.items():
+        if ok == referencia:
+            completas.add(var)
+        else:
+            print(f"[new_features] AVISO: {var} descartada do modo horário — "
+                  f"{len(ok)}/{len(referencia)} dias completos; sem imputação.")
+    return completas, pd.DatetimeIndex(sorted(referencia))
+
+
+def _flatten_points(campos, grid, indexer, ids, flatten_hourly, prefix) -> pd.DataFrame:
+    """Extrai os campos horários nas estações e achata as 24 horas em colunas."""
+    from src.feature_study.hourly_source import _require_regular_hourly
+
+    nomes = sorted(campos)
+    pts = extract_points(xr.Dataset({k: campos[k] for k in nomes}), indexer, "estacao", ids)
+    pts = pts.transpose("time", "estacao")
+    times = pd.DatetimeIndex(pts.time.values)
+    dias = pd.DatetimeIndex(_require_regular_hourly(times)[:, 0])
+    valores = np.stack([np.asarray(pts[v].values, dtype="float64") for v in nomes])
+    cols = flatten_hourly(valores, nomes, len(dias), len(ids), prefix)
+    idx = pd.MultiIndex.from_product([dias, list(ids)], names=["time", "estacao"])
+    return pd.DataFrame(cols, index=idx).reset_index()
+
+
+def load_new_features_hourly_flat(
+    raw_dir: str | Path, stations: pd.DataFrame, interp_method: str = "bilinear",
+    use_cache: bool = True,
+) -> pd.DataFrame | None:
+    """Features novas horárias achatadas, já nas estações de `stations`
+    (colunas `estacao`, `latitude`, `longitude`).
+
+    Cache próprio (`_hourly_flat_cache.parquet`), irmão do diário e com o mesmo
+    fingerprint de arquivos — acrescentar um `.nc` novo invalida os dois.
+    """
+    raw_dir = Path(raw_dir)
+    regions = discover_regions(raw_dir)
+    if not regions:
+        return None
+
+    stations = stations.drop_duplicates("estacao").sort_values("estacao").reset_index(drop=True)
+    cache = new_features_root(raw_dir) / HOURLY_FLAT_CACHE
+    fp = _fingerprint(raw_dir, regions) + "|" + "|".join(stations["estacao"].astype(str)) + f"|{interp_method}"
+    if use_cache and cache.exists():
+        cached = pd.read_parquet(cache)
+        if cached.attrs.get("fingerprint") == fp:
+            print(f"[new_features] Usando cache {cache.name}")
+            return cached
+        print("[new_features] Arquivos ou estações mudaram — refazendo o cache horário")
+
+    merged: pd.DataFrame | None = None
+    for region in regions:
+        df = _region_hourly_flat(region, raw_dir / BASIN_FILENAME, stations, interp_method)
+        if df is None:
+            continue
+        merged = df if merged is None else merged.merge(df, on=["estacao", "time"], how="outer")
+    if merged is None:
+        return None
+
+    n_cols = len(merged.columns) - 2
+    print(f"[new_features] horário achatado: {n_cols} colunas, {len(merged)} linhas, "
+          f"{merged['estacao'].nunique()} estações")
+    merged.attrs["fingerprint"] = fp
+    try:
+        tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+        merged.to_parquet(tmp, index=False)
+        tmp.replace(cache)
+    except OSError as exc:
+        print(f"[new_features] AVISO: cache horário não gravado ({exc}) — segue em memória")
+    return merged
+
+
+def merge_new_features_hourly_flat(
+    df: pd.DataFrame, raw_dir: str | Path, interp_method: str = "bilinear",
+    only_stations=None,
+) -> pd.DataFrame:
+    """Junta as colunas `hfn_*` a `df` por (estacao, time), usando as próprias
+    coordenadas das estações do frame — nenhuma lista de estações duplicada em
+    outro lugar do código.
+
+    `only_stations` restringe a extração. Sem ele, o frame diário traz TODAS as
+    estações de todos os clusters (237 na execução real) e a extração horária
+    custa 26× mais do que o estudo usa — as demais são descartadas logo depois
+    pela regra de cobertura. As estações de fora ficam NaN nas colunas `hfn_*`,
+    que é exatamente o que a completude já faz com elas.
+    """
+    stations = df[["estacao", "latitude", "longitude"]].drop_duplicates("estacao")
+    if only_stations is not None:
+        stations = stations[stations["estacao"].astype(str).isin({str(e) for e in only_stations})]
+        if stations.empty:
+            raise ValueError("nenhuma das estações pedidas está no frame")
+    flat = load_new_features_hourly_flat(raw_dir, stations, interp_method)
+    if flat is None:
+        return df
+    df = df.copy()
+    df["estacao"] = df["estacao"].astype(str)
+    flat["estacao"] = flat["estacao"].astype(str)
+    return df.merge(flat, on=["estacao", "time"], how="left")

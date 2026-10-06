@@ -527,3 +527,68 @@ def test_aggregate_writes_the_loss_outputs_only_when_the_loss_axis_ran(tmp_path)
     run_aggregate(out2, data2, ["r0"], label="t", n_boot=50)
     assert not (out2 / "summary" / "t" / "loss_frontier.csv").exists()
     assert (out2 / "summary" / "t" / "effects.csv").exists()
+
+
+# ── Cobertura parcial: cada modelo só existe nos trimestres em que foi eleito ──
+
+def test_a_model_covering_only_some_seasons_is_measured_not_discarded(tmp_path):
+    """Com a triagem top-5, um modelo só tem resíduo nos trimestres em que foi
+    eleito. Exigir cobertura de TODAS as linhas do teste deixava só a interseção
+    dos quatro trimestres — na execução real, um único modelo — e o efeito
+    pareado passava a repousar nele, com incerteza subestimada."""
+    from src.feature_study.analysis import _masked_draws
+
+    test = pd.DataFrame({
+        "year": [2000] * 6 + [2001] * 6, "month": [1] * 6 + [4] * 6,
+        "daily_wind_gust_max": np.arange(12, dtype=float) + 1.0,
+    })
+    e = np.full(12, np.nan)
+    e[:6] = 1.0                                   # o modelo só cobre o primeiro bloco
+    r = _masked_draws(np.ones((1, 2)), e, test, {})
+    assert r is not None
+    draws, mask = r
+    assert mask.sum() == 6
+    assert np.isclose(draws["rmse"][0], 1.0)      # RMSE só sobre as linhas que existem
+
+
+def test_masked_metrics_equal_the_full_metrics_when_coverage_is_complete():
+    """A guarda de regressão: um estudo com todos os modelos em todas as linhas
+    (o desenho antigo) tem de dar exatamente o mesmo resultado de antes."""
+    from src.feature_study.analysis import _draw_metrics, _masked_draws, make_blocks
+
+    rng = np.random.default_rng(3)
+    test = pd.DataFrame({"year": np.repeat([2000, 2001, 2002], 40), "month": np.tile([1, 4], 60),
+                         "daily_wind_gust_max": rng.gamma(4, 2, 120)})
+    e = rng.normal(0, 2, 120)
+    counts = np.vstack([np.ones(6), rng.multinomial(6, np.full(6, 1 / 6), size=5)]).astype(float)
+    antigo = _draw_metrics(counts, e, make_blocks(test))
+    novo, _ = _masked_draws(counts, e, test, {})
+    for k in antigo:
+        assert np.allclose(antigo[k], novo[k], equal_nan=True), k
+
+
+def test_a_pair_covering_different_rows_is_skipped_instead_of_mixing_seasons(tmp_path):
+    """Se o arm pior e o melhor cobrem linhas diferentes (uma unidade incompleta),
+    a diferença misturaria trimestres. O par é descartado em silêncio seguro, não
+    comparado."""
+    from src.feature_study.analysis import _masked_draws
+
+    test = pd.DataFrame({"year": [2000] * 4 + [2001] * 4, "month": [1] * 4 + [4] * 4,
+                         "daily_wind_gust_max": np.arange(8, dtype=float) + 1})
+    a = np.array([1, 1, 1, 1, np.nan, np.nan, np.nan, np.nan])
+    b = np.array([np.nan, np.nan, np.nan, np.nan, 1, 1, 1, 1])
+    ra, rb = _masked_draws(np.ones((1, 2)), a, test, {}), _masked_draws(np.ones((1, 2)), b, test, {})
+    assert not np.array_equal(ra[1], rb[1])
+
+
+def test_discover_models_returns_every_model_that_has_residuals(tmp_path):
+    """O modo top-5 mede os modelos que a triagem elegeu, e não só os 7 de
+    referência fixados a priori."""
+    from src.feature_study.analysis import discover_models
+
+    pasta = tmp_path / "units" / "full"
+    pasta.mkdir(parents=True)
+    pd.DataFrame({"row_id": [0], "MLPRegressor": [1.0], "Ridge": [1.0]}).to_parquet(pasta / "resid__DJF__base.parquet")
+    pd.DataFrame({"row_id": [1], "GradientBoostingRegressor": [1.0], "Ridge": [1.0]}).to_parquet(
+        pasta / "resid__JJA__base.parquet")
+    assert discover_models(tmp_path, ["full"]) == ["GradientBoostingRegressor", "MLPRegressor", "Ridge"]

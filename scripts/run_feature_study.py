@@ -42,7 +42,11 @@ def main() -> None:
     f.add_argument("--seed", type=int, default=MODEL_SEED, help="seed do modelo (uma das MODEL_SEEDS)")
     f.add_argument("--season", required=True, choices=SEASONS)
     f.add_argument("--arms", required=True, help="nomes separados por vírgula")
-    f.add_argument("--models", default="all", choices=["all", "reference", "fast3"])
+    # `--models` aceita também uma lista de nomes separados por vírgula (é
+    # como a triagem top-5 entra quando rodada localmente), então não pode ser
+    # um `choices` fechado.
+    f.add_argument("--models", default="all",
+                   help="all (39) | reference (7) | fast3 (3) | lista de nomes separados por vírgula")
     f.add_argument("--no-skip-existing", action="store_true")
 
     a = sub.add_parser("aggregate")
@@ -63,8 +67,13 @@ def main() -> None:
         unknown = [n for n in wanted if n not in by_name]
         if unknown:
             raise SystemExit(f"arms desconhecidos: {unknown}. Disponíveis: {sorted(by_name)}")
+        # Lista de nomes vira `list[str]`; os modos continuam string. É o que
+        # faz `select_regressors` filtrar o pool pelos modelos da triagem.
+        modelos = args.models
+        if modelos not in ("all", "reference", "fast3"):
+            modelos = [m for m in modelos.split(",") if m]
         run_unit(out / "data", out, args.tag, args.season, [by_name[n] for n in wanted],
-                 models=args.models, skip_existing=not args.no_skip_existing,
+                 models=modelos, skip_existing=not args.no_skip_existing,
                  seed=args.seed, out_tag=seed_tag(args.seed))
     else:
         res = run_aggregate(out, out / "data", [t for t in args.tags.split(",") if t],

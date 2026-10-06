@@ -26,6 +26,21 @@ def seed_tag(seed: int) -> str:
     `full` — é onde já está o run anterior, que continua valendo como réplica 1."""
     return "full" if seed == MODEL_SEED else f"full_s{seed}"
 
+
+TRIAGE_SUFFIX = "_triage"
+
+
+def triage_tag(seed: int) -> str:
+    """Pasta da TRIAGEM (`units/<tag>_triage/`): os 39 modelos no arm `base`.
+
+    Precisa ser separada da pasta do estudo. Triagem e estudo gravam o MESMO
+    nome de arquivo para o arm `base` (`metrics__<trimestre>__base.parquet`), e o
+    estudo o refaz com só 5 modelos: na mesma pasta, ele sobrescrevia a
+    leaderboard de 39 modelos e a triagem deixava de ser auditável. Pior: rodar
+    `screen` DEPOIS do estudo escolheria entre os 5 que já tinham sido escolhidos
+    (medido: um top-5 encolheu para 4)."""
+    return seed_tag(seed) + TRIAGE_SUFFIX
+
 # AMOSTRAGEM DESLIGADA (decisão: treinar no treino COMPLETO). O cluster 3 tem só
 # 24.814 linhas de treino (~6 mil por trimestre) — a estimativa inicial de ~29 mil
 # por trimestre vinha do `cluster_lazy`, que soma o cluster vizinho ao treino, e
