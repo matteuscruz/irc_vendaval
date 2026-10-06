@@ -24,12 +24,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.feature_study.arms import Arm
-from src.feature_study.config import (
+from src.feature_study.core.arms import Arm
+from src.feature_study.core.config import (
     CLIP_RANGE, CLUSTER_ID, FAST_MODELS, MODEL_SEED, REFERENCE_MODELS,
 )
-from src.feature_study.groups_source import REFERENCE_COLUMN
-from src.feature_study.losses import make_regressors
+from src.feature_study.data.groups_source import REFERENCE_COLUMN
 from src.pipelines.common import (
     ERA5_GUST_PROXY, RANDOM_STATE, TARGET_VAR, compute_metrics, preprocess_df,
 )
@@ -42,16 +41,10 @@ PRED_DUMP_ARMS = ("base", "full")
 METRIC_COLS = ["R2", "RMSE", "Bias", "Bias_P90", "RMSE_P90"]
 
 
-def select_regressors(models="all", loss: str = "") -> list:
+def select_regressors(models="all") -> list:
     """`all` = os 39 do LazyPredict (mesmo filtro de `cluster_lazy`), `reference`
     = os 7 fixados a priori, `fast3` = os 3 do piloto. `models` também aceita
     uma LISTA de nomes — é como a triagem top-5 chega até aqui.
-
-    Com `loss`, o conjunto passa a ser o de `LOSS_MODELS` (os únicos que aceitam
-    trocar a perda), ainda filtrado por `models`. Um modelo pedido por `models`
-    que não exista nesse conjunto NÃO é erro aqui: o eixo de perda é
-    intrinsecamente definido sobre um subconjunto, e `compute_effects` já
-    restringe a comparação aos modelos presentes dos dois lados.
 
     Um nome desconhecido LEVANTA, em vez de ser ignorado: um erro de digitação
     devolveria lista vazia e o `LazyRegressor` treinaria zero modelos sem
@@ -60,7 +53,7 @@ def select_regressors(models="all", loss: str = "") -> list:
     """
     from src.pipelines.cluster_lazy import _FAST_REGRESSORS
 
-    pool = make_regressors(loss) if loss else list(_FAST_REGRESSORS)
+    pool = list(_FAST_REGRESSORS)
     if isinstance(models, str):
         if models == "all":
             return pool
@@ -73,7 +66,7 @@ def select_regressors(models="all", loss: str = "") -> list:
             raise ValueError("lista de modelos vazia")
     chosen = [c for c in pool if c.__name__ in set(names)]
     missing = set(names) - {c.__name__ for c in chosen}
-    if missing and not loss:
+    if missing:
         raise ValueError(f"modelos ausentes do LazyPredict: {sorted(missing)}")
     return chosen
 
@@ -122,9 +115,9 @@ def _features_fingerprint(features) -> str:
 
 
 def _is_current(path: Path, models_mode: str, seed: int = MODEL_SEED,
-                loss: str = "mse", features_fp: str | None = None) -> bool:
+                features_fp: str | None = None) -> bool:
     """Arquivo existente só vale se foi gerado com o MESMO conjunto de
-    modelos, a MESMA seed, a MESMA perda e a MESMA lista de features do arm.
+    modelos, a MESMA seed e a MESMA lista de features do arm.
 
     Sem o primeiro trio, o piloto (3 modelos) e o run completo (39)
     compartilhando a pasta `units/full/` fariam o `fit` idempotente pular os
@@ -139,29 +132,18 @@ def _is_current(path: Path, models_mode: str, seed: int = MODEL_SEED,
         return False
     if not ((cols["models_mode"] == models_mode).all() and (cols["model_seed"] == seed).all()):
         return False
-    # `loss` e `features_fp` são colunas mais NOVAS que `models_mode`/`seed`.
-    # Cada uma é lida à parte, de propósito: juntá-las à leitura acima faria
-    # todo parquet gravado antes delas existir levantar, devolver False e ser
-    # refeito em silêncio — o oposto do que a idempotência promete.
-    try:
-        gravado = pd.read_parquet(path, columns=["loss"])["loss"]
-    except Exception:
-        # Ausência aqui TEM significado: todo arquivo anterior ao eixo de
-        # perda é, por construção, MSE.
-        if loss != "mse":
-            return False
-    else:
-        if not (gravado == loss).all():
-            return False
+    # `features_fp` é uma coluna mais NOVA que `models_mode`/`seed`, lida à parte
+    # de propósito: juntá-la à leitura acima faria todo parquet gravado antes
+    # dela existir levantar, devolver False e ser refeito em silêncio.
     if features_fp is None:
         return True
     try:
         gravado_fp = pd.read_parquet(path, columns=["features_fp"])["features_fp"]
     except Exception:
-        # Ausência aqui NÃO tem significado seguro — ao contrário de `loss`,
-        # não há um valor "óbvio" para arquivos gravados antes desta coluna
-        # existir (foi exatamente uma mudança de composição de features, sem
-        # aviso, que motivou criá-la). Refaz por segurança.
+        # Ausência aqui NÃO tem significado seguro: não há um valor "óbvio"
+        # para arquivos gravados antes desta coluna existir (foi exatamente uma
+        # mudança de composição de features, sem aviso, que motivou criá-la).
+        # Refaz por segurança.
         return False
     return bool((gravado_fp == features_fp).all())
 
@@ -290,10 +272,7 @@ def run_unit(
     `out_tag` grava em outra pasta a MESMA amostra — é como o piloto repete uma
     unidade para confirmar o determinismo.
 
-    Os regressores são escolhidos POR ARM, não uma vez por unidade: um arm do
-    eixo de perda carrega a própria perda (`arm.loss`) e precisa das subclasses
-    correspondentes. `regressors` explícito continua vencendo — é o atalho dos
-    testes.
+    `regressors` explícito vence `models` — é o atalho dos testes.
 
     Com um conjunto CUSTOM de modelos (a triagem top-5, ou `regressors`
     explícito), o `models_mode` leva a impressão digital do conjunto. Sem ela,
@@ -314,19 +293,18 @@ def run_unit(
 
     written = []
     for arm in arms:
-        regs = regressors if regressors is not None else select_regressors(models, arm.loss)
-        arm_loss = arm.loss or "mse"
+        regs = regressors if regressors is not None else select_regressors(models)
         feat_fp = _features_fingerprint(arm.features)
         m_path = out / f"metrics__{season}__{arm.name}.parquet"
         r_path = out / f"resid__{season}__{arm.name}.parquet"
-        if skip_existing and r_path.exists() and _is_current(m_path, models_mode, seed, arm_loss, feat_fp):
+        if skip_existing and r_path.exists() and _is_current(m_path, models_mode, seed, feat_fp):
             print(f"[fit] {sample_tag}/{season}/{arm.name}: já existe "
-                  f"({models_mode}, {arm_loss}) — pulando", flush=True)
+                  f"({models_mode}) — pulando", flush=True)
             written += [m_path, r_path]
             continue
         print(f"[fit] {sample_tag}/{season}/{arm.name}: {len(arm.features)} features, "
               f"{len(train)} treino, {len(val)} val, {len(test)} teste, "
-              f"{len(regs)} modelos, perda {arm_loss}", flush=True)
+              f"{len(regs)} modelos", flush=True)
         # Os modelos que ganham resíduo são os EFETIVAMENTE ajustados neste
         # arm, não a tupla fixa de referência: no modo top-5 o campeão pode não
         # estar entre os 7, e sem resíduo `compute_effects` fica cego.
@@ -342,7 +320,7 @@ def run_unit(
             resid_models=guardar, preds_out=preds_out, fitted_out=fitted_out,
         )
         if quer_modelo and champion in (fitted_out or {}):
-            from src.feature_study.artifacts import champion_artifact, dump_champion_pipeline
+            from src.feature_study.core.artifacts import champion_artifact, dump_champion_pipeline
 
             r2 = metrics.loc[(metrics["model"] == champion) & (metrics["split"] == "val"), "R2"]
             dump_champion_pipeline(champion_artifact(
@@ -357,7 +335,6 @@ def run_unit(
         metrics["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
         metrics["model_seed"] = seed
         metrics["models_mode"] = models_mode
-        metrics["loss"] = arm_loss
         metrics["features_fp"] = feat_fp
         # Consultável na análise, mas deliberadamente FORA de `_is_current`:
         # `models_mode` já carrega a mesma informação e acrescentar outra

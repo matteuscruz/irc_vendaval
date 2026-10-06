@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.feature_study.analysis import top_models_by_season, top_models_payload
-from src.feature_study.worker import _models_fingerprint, select_regressors
+from src.feature_study.core.analysis import top_models_by_season, top_models_payload
+from src.feature_study.core.worker import _models_fingerprint, select_regressors
 
 SEASONS = ("DJF", "MAM", "JJA", "SON")
 

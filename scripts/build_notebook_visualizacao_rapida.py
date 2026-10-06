@@ -69,8 +69,8 @@ treino = pd.read_parquet(BASE / "data/sample_full.parquet")
 treino = treino[treino._split == "train"]
 teste = pd.read_parquet(BASE / "data/test.parquet")
 
-from src.feature_study.group_importance import DESCRICAO, blocos_das_novas
-from src.feature_study.hourly_flat import base_variable_of
+from src.feature_study.diagnostics.group_importance import DESCRICAO, blocos_das_novas
+from src.feature_study.diagnostics.group_importance import base_variable_of
 
 BLOCOS = {}
 for col in FEATURES:

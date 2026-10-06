@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from src.feature_study import selected as sel
-from src.feature_study.analysis import comparisons
-from src.feature_study.arms import SELECTION_AXIS, Arm
+from src.feature_study.selection import selected as sel
+from src.feature_study.core.analysis import comparisons
+from src.feature_study.core.arms import SELECTION_AXIS, Arm
 
 FULL = ["gust10fg", "gust10fg_lag1h", "w10", "w10_r75_max", "cape", "cape_r75_max", "anor_ponto",
         "anor_r75_mean", "sdor_ponto", "latitude"]

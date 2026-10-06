@@ -5,7 +5,6 @@ Roda o LazyPredict de verdade, mas com 2 regressores baratos e dados minúsculos
 """
 from __future__ import annotations
 
-import json
 
 import numpy as np
 import pandas as pd
@@ -13,13 +12,13 @@ import pytest
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.linear_model import Ridge
 
-from src.feature_study.analysis import compare_units
-from src.feature_study.arms import Arm
-from src.feature_study.worker import _features_fingerprint
-from src.feature_study.config import (
-    LOSS_MODELS, MAIN_TAGS, MODEL_SEED, MODEL_SEEDS, seed_tag,
+from src.feature_study.core.analysis import compare_units
+from src.feature_study.core.arms import Arm
+from src.feature_study.core.worker import _features_fingerprint
+from src.feature_study.core.config import (
+    MAIN_TAGS, MODEL_SEED, MODEL_SEEDS, seed_tag,
 )
-from src.feature_study.worker import (
+from src.feature_study.core.worker import (
     _models_fingerprint, fit_arm, load_unit_frames, run_unit, select_regressors,
 )
 from src.pipelines.common import TARGET_VAR
@@ -90,7 +89,7 @@ def test_a_model_with_nonfinite_test_predictions_is_recorded_not_fatal(data_dir)
 
 
 def test_infinite_prediction_is_a_failure_not_clipped_to_the_physical_maximum():
-    from src.feature_study.worker import _safe_metrics
+    from src.feature_study.core.worker import _safe_metrics
 
     m, bad = _safe_metrics(np.array([1.0, 2.0, 3.0]), np.array([1.0, np.inf, 3.0]))
     assert m is None and bad == 1
@@ -209,77 +208,10 @@ def test_select_regressors_modes_and_errors():
 
 # ── prepare ponta a ponta ───────────────────────────────────────────────────
 
-def test_prepare_end_to_end_on_the_synthetic_cluster(synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
-    from src.feature_study.prepare import prepare
-
-    # `core` (= anchors + singles) explícito: este teste cobre a varredura
-    # individual, que deixou de entrar por omissão.
-    meta = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "study",
-                   eps=0.15, seeds=(1, 2), pilot_sizes=(60,), cluster_id=9,
-                   arm_sets=("core", "groups", "controls"))
-    data = tmp_path / "study" / "data"
-
-    for f in ("meta.json", "arms.json", "test.parquet", "sample_full.parquet", "sample_r0.parquet",
-              "sample_r1.parquet", "sample_n60_r0.parquet", "representativeness.csv"):
-        assert (data / f).exists(), f
-
-    # Cobertura: o cluster 10 (sem features novas) foi descartado; o 9 ficou.
-    assert "10" in meta["clusters_dropped_by_coverage"]
-    assert meta["cluster_id"] == 9
-    # Sem as duplicatas conhecidas.
-    assert "nf_ws10_max" not in meta["new_features"] and "nf_ws10_std" in meta["new_features"]
-
-    test = pd.read_parquet(data / "test.parquet")
-    r0 = pd.read_parquet(data / "sample_r0.parquet")
-    full = pd.read_parquet(data / "sample_full.parquet")
-    assert set(test["_split"]) == {"test"} and set(r0["_split"]) <= {"train", "val"}
-    assert not (set(zip(r0["estacao"], r0["time"])) & set(zip(test["estacao"], test["time"])))
-    assert len(r0) < len(full)                                           # de fato amostrou
-    assert full["row_id"].is_unique and test["row_id"].is_unique
-    assert set(full["row_id"]).isdisjoint(set(test["row_id"]))
-
-    # Réplicas diferentes ⇒ amostras diferentes; mesmas linhas para qualquer arm.
-    r1 = pd.read_parquet(data / "sample_r1.parquet")
-    assert set(r0["row_id"]) != set(r1["row_id"])
-
-    arms = [Arm.from_dict(d) for d in json.loads((data / "arms.json").read_text())]
-    assert {"base", "full", "add__nf_ws10_std", "drop_grp__cape", "ctrl__noise"} <= {a.name for a in arms}
-    cols = set(r0.columns)
-    assert all(set(a.features) <= cols for a in arms)                    # todo arm cabe na amostra
-    assert r0[sorted(cols - {"time"})].select_dtypes("number").notna().all().all()
 
 
-def test_prepare_defaults_to_the_full_training_set_and_removes_stale_samples(
-    synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path,
-):
-    """Decisão: treino COMPLETO, sem amostragem. Uma amostra de execução
-    anterior ao lado de `sample_full` convida a analisar a errada — é removida."""
-    from src.feature_study.prepare import prepare
-
-    study = tmp_path / "study"
-    data = study / "data"
-    data.mkdir(parents=True)
-    for stale in ("sample_r0.parquet", "sample_n2000_r0.parquet"):
-        (data / stale).write_bytes(b"velho")
-    (data / "representativeness.csv").write_text("velho")
-
-    meta = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), study, cluster_id=9)
-
-    assert meta["sampling"] is False and meta["n_target_per_season"] is None
-    assert sorted(p.name for p in data.glob("sample_*.parquet")) == ["sample_full.parquet"]
-    assert not (data / "representativeness.csv").exists()
-    assert meta["flags"] == {}
-    assert set(meta["train_rows_per_season"]) == {"DJF", "MAM", "JJA", "SON"}
-    full = pd.read_parquet(data / "sample_full.parquet")
-    assert set(full["_split"]) == {"train", "val"} and len(full) == meta["n_trainval_rows"]
 
 
-def test_pilot_sizes_without_seeds_is_an_error(synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
-    from src.feature_study.prepare import prepare
-
-    with pytest.raises(ValueError, match="exige ao menos uma seed"):
-        prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "s",
-                pilot_sizes=(50,), cluster_id=9)
 
 
 # ── Seeds fixas do modelo (uma réplica de treino por seed) ──────────────────
@@ -326,105 +258,13 @@ def test_a_unit_from_another_seed_is_refit_not_skipped(data_dir, tmp_path):
     assert (pd.read_parquet(m_path)["model_seed"] == 43).all()
 
 
-# ── Eixo de perda ───────────────────────────────────────────────────────────
-
-ARM_LOSS = Arm("full__exp90", ("f_ruido", "f_util"), "loss", "losses",
-               subject="exp90", reference="full", role="add", loss="exp90", axis="loss")
 
 
-def test_a_parquet_from_before_the_loss_column_is_still_considered_current(data_dir, tmp_path):
-    """O volume do Modal já tem o estudo inteiro (37 arms × 4 trimestres × 5
-    seeds) gravado ANTES da coluna `loss`. Se `_is_current` a exigisse junto das
-    outras, cada um desses arquivos levantaria, devolveria False e seria refeito
-    em silêncio — refazendo (e pagando) o estudo todo."""
-    from src.feature_study.worker import _is_current
-
-    out = tmp_path / "out"
-    m_path = run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)[0]
-    antigo = pd.read_parquet(m_path).drop(columns=["loss"])
-    antigo.to_parquet(m_path, index=False)
-
-    assert _is_current(m_path, MODO_CUSTOM, 42, "mse")
-    assert not _is_current(m_path, MODO_CUSTOM, 42, "exp90")
 
 
-def test_two_different_losses_do_not_skip_each_other(data_dir, tmp_path):
-    """Mesmo `models_mode` e mesma seed: sem a perda na chave de frescor, o
-    segundo braço herdaria as métricas do primeiro sem nenhum aviso."""
-    from src.feature_study.worker import _is_current
-
-    out = tmp_path / "out"
-    m_path = run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)[0]
-
-    assert _is_current(m_path, MODO_CUSTOM, 42, "mse")
-    assert not _is_current(m_path, MODO_CUSTOM, 42, "huber44")
 
 
-def test_each_arm_gets_the_regressors_of_its_own_loss(data_dir, tmp_path):
-    """A lista de regressores era montada UMA vez por unidade. Com dois eixos no
-    mesmo lote, o arm de perda precisa das subclasses e o arm MSE não."""
-    out = tmp_path / "out"
-    run_unit(data_dir, out, "r0", "DJF", [ARM_FULL, ARM_LOSS])
 
-    mse = pd.read_parquet(out / "units" / "r0" / "metrics__DJF__full.parquet")
-    perda = pd.read_parquet(out / "units" / "r0" / "metrics__DJF__full__exp90.parquet")
-
-    assert (mse["loss"] == "mse").all()
-    assert (perda["loss"] == "exp90").all()
-    assert set(perda["model"]) == set(LOSS_MODELS)          # só os 3 que trocam de perda
-    assert set(mse["model"]) > set(perda["model"])          # o arm MSE roda os 39
-
-
-def test_the_loss_arm_writes_residuals_under_its_own_suffixed_name(data_dir, tmp_path):
-    """O nome com SUFIXO é o que impede o glob `resid__*__full.parquet` de
-    capturar também os resíduos da perda."""
-    out = tmp_path / "out"
-    run_unit(data_dir, out, "r0", "DJF", [ARM_LOSS])
-    escritos = {p.name for p in (out / "units" / "r0").glob("*.parquet")}
-
-    assert escritos == {"metrics__DJF__full__exp90.parquet", "resid__DJF__full__exp90.parquet"}
-
-
-def test_select_regressors_narrows_to_the_models_that_can_change_loss():
-    """`reference` pede 7 modelos, mas só 3 aceitam trocar a perda. Isso NÃO é
-    erro: o eixo é definido sobre um subconjunto, e pedir os 7 aqui derrubaria a
-    unidade inteira."""
-    assert [c.__name__ for c in select_regressors("all", "exp70")] == list(LOSS_MODELS)
-    assert [c.__name__ for c in select_regressors("reference", "exp70")] == list(LOSS_MODELS)
-    assert len(select_regressors("all")) == 39
-
-
-def test_the_loss_axis_runs_end_to_end_from_prepare_to_aggregate(
-        synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
-    """prepare(losses) → fit → aggregate no dado sintético. Os testes por módulo
-    não veem a FIAÇÃO: arms.json carregando os campos novos, o worker escolhendo
-    os regressores pelo `arm.loss` e a análise achando os resíduos pelo nome com
-    sufixo. É o ensaio local do que vai rodar no Modal."""
-    from src.feature_study.analysis import load_arms, run_aggregate
-    from src.feature_study.prepare import prepare
-
-    study = tmp_path / "study"
-    meta = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), study,
-                   arm_sets=("core", "losses"), cluster_id=9)
-    assert meta["loss_arms"] and meta["loss_models"] == list(LOSS_MODELS)
-
-    arms = load_arms(study / "data")
-    escolhidos = [a for a in arms if a.name in ("base", "full", "full__exp90")]
-    # Os quatro trimestres: `load_residuals` exige o vetor COMPLETO do teste, e
-    # um trimestre faltando descarta o arm inteiro da análise.
-    for season in sorted(pd.read_parquet(study / "data" / "test.parquet")["season"].unique()):
-        run_unit(study / "data", study, "full", season, escolhidos, models="fast3")
-
-    res = run_aggregate(study, study / "data", ["full"], label="t", n_boot=50)
-    fr = res["loss_frontier"]
-
-    assert not fr.empty and set(fr["comparison"]) == {"full__exp90"}
-    eff = res["effects"]
-    assert set(eff["axis"]) == {"features", "loss"}
-    # Cada eixo é julgado na SUA métrica primária e tem o próprio SESOI.
-    julgado = eff[eff["verdict"] != ""].groupby("axis")["metric"].unique()
-    assert set(julgado["features"]) == {"rmse"} and set(julgado["loss"]) == {"rmse_p90"}
-    assert eff.groupby("axis")["sesoi"].nunique().eq(1).all()
 
 
 # ── Fingerprint de features (protege contra reuso indevido) ─────────────────
@@ -455,11 +295,10 @@ def test_the_same_arm_name_with_a_different_feature_set_is_refit_not_reused(data
 
 
 def test_a_parquet_from_before_the_features_fingerprint_is_not_considered_current(data_dir, tmp_path):
-    """Diferente do caso de `loss` (ausência = "mse", por construção): aqui não
-    existe um valor seguro para assumir em arquivo antigo — foi exatamente uma
-    mudança de composição sem aviso que motivou criar a coluna. Ausente ⇒
+    """Não existe um valor seguro para assumir em arquivo antigo: foi exatamente
+    uma mudança de composição sem aviso que motivou criar a coluna. Ausente ⇒
     refaz, sempre."""
-    from src.feature_study.worker import _is_current
+    from src.feature_study.core.worker import _is_current
 
     out = tmp_path / "out"
     m_path = run_unit(data_dir, out, "r0", "DJF", [ARM_FULL], regressors=REGS)[0]
@@ -467,7 +306,7 @@ def test_a_parquet_from_before_the_features_fingerprint_is_not_considered_curren
     antigo.to_parquet(m_path, index=False)
 
     fp = _features_fingerprint(ARM_FULL.features)
-    assert not _is_current(m_path, MODO_CUSTOM, 42, "mse", fp)
+    assert not _is_current(m_path, MODO_CUSTOM, 42, fp)
 
 
 def test_features_fingerprint_is_stable_and_order_independent():
@@ -480,62 +319,10 @@ def test_features_fingerprint_is_stable_and_order_independent():
     assert _features_fingerprint(a.split()) == _features_fingerprint(a.split())  # determinístico
 
 
-def test_hourly_source_is_opt_in_via_arm_sets(synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
-    """`"hourly" not in arm_sets` (o padrão) tem de dar a MESMA população de
-    antes da fonte horária existir — é o que permite escolher diário ou
-    diário+horário e comparar as duas rodadas."""
-    from conftest import build_synthetic_hourly_file
-    from src.feature_study.prepare import prepare
-
-    build_synthetic_hourly_file(synthetic_nf_raw_dir)   # arquivo presente no disco
-
-    so_diario = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "diario", cluster_id=9)
-    com_horario = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "horario",
-                          cluster_id=9, arm_sets=("core", "groups", "controls", "hourly"))
-
-    horarias = {f for f in com_horario["new_features"] if f.startswith("nf_h_")}
-    assert horarias                                                        # a fonte entrou
-    assert not any(f.startswith("nf_h_") for f in so_diario["new_features"])  # sem o token, nem lida
-    assert set(so_diario["new_features"]) < set(com_horario["new_features"])
-    assert set(com_horario["new_features"]) - set(so_diario["new_features"]) == horarias
-
-    arms_horario = json.loads((tmp_path / "horario" / "data" / "arms.json").read_text())
-    assert {"add_grp__hourly", "drop_grp__hourly"} <= {a["name"] for a in arms_horario}
-    arms_diario = json.loads((tmp_path / "diario" / "data" / "arms.json").read_text())
-    assert not any("hourly" in a["name"] for a in arms_diario)
 
 
-def test_hourly_only_replaces_the_grid_pool_instead_of_adding_to_it(
-    synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path,
-):
-    """`hourly_only` responde uma pergunta diferente de `hourly`: "o horário
-    SOZINHO ajuda?", não "ajuda além do que já temos?" — só `nf_h_*` no pool
-    de features novas, a base de 40 continua intocada."""
-    from conftest import build_synthetic_hourly_file
-    from src.feature_study.prepare import prepare
-
-    build_synthetic_hourly_file(synthetic_nf_raw_dir)
-
-    so_horario = prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "so_horario",
-                         cluster_id=9, arm_sets=("core", "groups", "controls", "hourly_only"))
-
-    assert so_horario["new_features"]                                     # não ficou vazio
-    assert all(f.startswith("nf_h_") for f in so_horario["new_features"])  # só horárias
-    assert len(so_horario["base_features"]) == 40                          # base intocada
-
-    full = pd.read_parquet(tmp_path / "so_horario" / "data" / "sample_full.parquet")
-    grade_presente = [c for c in full.columns if c.startswith("nf_") and not c.startswith("nf_h_")]
-    assert not grade_presente   # as nf_* da grade não entram nem como coluna descartável
 
 
-def test_hourly_and_hourly_only_together_is_a_contradiction(synthetic_nf_raw_dir, synthetic_shp_dir, tmp_path):
-    from conftest import build_synthetic_hourly_file
-    from src.feature_study.prepare import prepare
-
-    build_synthetic_hourly_file(synthetic_nf_raw_dir)
-    with pytest.raises(ValueError, match="exclusivos"):
-        prepare(str(synthetic_nf_raw_dir), str(synthetic_shp_dir), tmp_path / "out",
-               cluster_id=9, arm_sets=("core", "hourly", "hourly_only"))
 
 
 def test_triage_and_study_never_share_an_output_folder(data_dir, tmp_path):
@@ -543,7 +330,7 @@ def test_triage_and_study_never_share_an_output_folder(data_dir, tmp_path):
     arm `base`. Na mesma pasta, o estudo sobrescrevia a leaderboard da triagem —
     acontecido de verdade no `cluster3_raw` — e rodar o `screen` depois escolhia
     entre os 5 que já tinham sido escolhidos (um top-5 encolheu para 4)."""
-    from src.feature_study.config import seed_tag, triage_tag
+    from src.feature_study.core.config import seed_tag, triage_tag
 
     assert triage_tag(42) != seed_tag(42) and triage_tag(43) != seed_tag(43)
 

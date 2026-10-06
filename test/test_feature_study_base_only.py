@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from src.feature_study import base_only as bo
+from src.feature_study.data import base_only as bo
 
 
 def _nc(tmp_path):

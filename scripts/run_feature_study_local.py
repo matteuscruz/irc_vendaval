@@ -72,7 +72,7 @@ def _formata(seg: float) -> str:
 
 class Plano:
     def __init__(self, args):
-        from src.feature_study.config import MODEL_SEEDS, seed_tag, triage_tag
+        from src.feature_study.core.config import MODEL_SEEDS, seed_tag, triage_tag
         self.out = RAIZ / args.out_dir
         self.data = self.out / "data"
         self.seeds = [int(s) for s in args.seeds.split(",") if s] or [MODEL_SEEDS[0]]
@@ -87,7 +87,7 @@ class Plano:
         self.seed_tag = seed_tag
 
     def arms(self):
-        from src.feature_study.analysis import load_arms
+        from src.feature_study.core.analysis import load_arms
         return load_arms(self.data)
 
     def top5(self):
@@ -114,16 +114,16 @@ def _roda_unidades(plano: Plano, unidades, rotulo: str) -> None:
 
 
 def estagio_prepare(plano: Plano) -> None:
-    from src.feature_study.prepare import prepare
+    from src.feature_study.core.prepare import prepare
 
     if (plano.data / "meta.json").exists() and not plano.args.force:
         print(f"[prepare] já existe em {plano.data} (use --force para refazer)")
         return
-    prepare(str(RAIZ / plano.args.raw_dir), str(RAIZ / "dataset/shp"), plano.out, arm_sets=ARM_SETS)
+    prepare(str(RAIZ / plano.args.raw_dir), plano.out, arm_sets=ARM_SETS)
 
 
 def estagio_triage(plano: Plano) -> None:
-    from src.feature_study.worker import run_unit
+    from src.feature_study.core.worker import run_unit
 
     arms = [a for a in plano.arms() if a.name == "base"]
     unidades = [
@@ -138,7 +138,7 @@ def estagio_triage(plano: Plano) -> None:
 def estagio_screen(plano: Plano) -> None:
     import json
 
-    from src.feature_study.analysis import top_models_by_season, top_models_payload
+    from src.feature_study.core.analysis import top_models_by_season, top_models_payload
 
     top = top_models_by_season(plano.out, plano.triage_tags, arm="base", k=plano.args.k)
     if top.empty:
@@ -158,7 +158,7 @@ def estagio_screen(plano: Plano) -> None:
 
 
 def estagio_study(plano: Plano) -> None:
-    from src.feature_study.worker import run_unit
+    from src.feature_study.core.worker import run_unit
 
     por_trimestre = plano.top5()
     arms = plano.arms()
@@ -176,7 +176,7 @@ def estagio_study(plano: Plano) -> None:
 
 
 def estagio_aggregate(plano: Plano) -> None:
-    from src.feature_study.analysis import run_aggregate
+    from src.feature_study.core.analysis import run_aggregate
 
     res = run_aggregate(plano.out, plano.data, plano.tags, label="main", n_boot=plano.args.n_boot)
     print(res["ranking_groups"].to_string(index=False))

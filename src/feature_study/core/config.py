@@ -41,26 +41,9 @@ def triage_tag(seed: int) -> str:
     (medido: um top-5 encolheu para 4)."""
     return seed_tag(seed) + TRIAGE_SUFFIX
 
-# AMOSTRAGEM DESLIGADA (decisão: treinar no treino COMPLETO). O cluster 3 tem só
-# 24.814 linhas de treino (~6 mil por trimestre) — a estimativa inicial de ~29 mil
-# por trimestre vinha do `cluster_lazy`, que soma o cluster vizinho ao treino, e
-# este estudo não usa vizinhos. Com a população tão pequena, amostrar quase não
-# economiza (uma unidade de 39 modelos leva ~25 s) e as réplicas se sobreporiam
-# em ~75%. Com seeds fixas e dados completos não há réplica a fazer: a única
-# incerteza é o bootstrap em blocos do teste. O código de amostragem
-# (`sampling.py`) continua testado e disponível: passe `seeds`/`pilot_sizes` a
-# `prepare()` para reativá-lo.
-SAMPLE_SEEDS: tuple[int, ...] = ()
 MAIN_TAGS = tuple(seed_tag(s) for s in MODEL_SEEDS)   # uma réplica de treino por seed
 
 SEASONS = ("DJF", "MAM", "JJA", "SON")
-
-# Tamanho da amostra: limite DKW n = ln(2/alpha) / (2 eps^2). Heurística de
-# dimensionamento (assume iid; o n efetivo é menor por dependência entre
-# estações do mesmo dia) — quem valida o tamanho é a curva de aprendizado.
-EPS = 0.02
-ALPHA = 0.05
-PILOT_SIZES: tuple[int, ...] = ()
 
 # Efeito mínimo relevante: 1% do RMSE do arm base.
 SESOI_REL = 0.01
@@ -68,9 +51,6 @@ BOOTSTRAP_DRAWS = 2000
 
 # Faixa física, a mesma da inferência (src/inference/grid_direct_predict.py).
 CLIP_RANGE = (0.0, 80.0)
-
-# Idênticas a ws_max / ws_mean do ERA5-Bacia (diferença medida: 0,0000 m/s).
-EXCLUDED_DUPLICATES = ("nf_ws10_max", "nf_ws10_mean")
 
 # Conjunto de referência FIXADO A PRIORI (não escolhido nos dados: escolher o
 # top-K pelo arm base geraria regressão à média contra as features).
@@ -81,19 +61,8 @@ REFERENCE_MODELS = (
 )
 FAST_MODELS = ("CatBoostRegressor", "LGBMRegressor", "HistGradientBoostingRegressor")
 
-# Modelos do EIXO DE PERDA — subconjunto de REFERENCE_MODELS que aceita trocar a
-# função de perda. HistGB não tem expectila (só squared_error/absolute_error/
-# poisson/quantile/gamma); ExtraTrees/RandomForest (só `criterion`) e Ridge
-# também não. Incluir o HistGB apenas no braço Huber deixaria o conjunto de
-# modelos irregular ENTRE perdas e confundiria o contraste Huber×expectila com a
-# troca de modelos — por isso os mesmos 3 em todos os braços de perda.
-LOSS_MODELS = ("CatBoostRegressor", "LGBMRegressor", "XGBRegressor")
-
-# Métrica primária por eixo. RMSE é a métrica ERRADA para o eixo de perda: um
-# modelo expectila perde em RMSE por construção (deixa de estimar a média
-# condicional). `rmse_p90` continua sendo erro (menor é melhor), então a
-# convenção de sinal e o veredito valem sem mudança.
-PRIMARY_METRIC = {"features": "rmse", "loss": "rmse_p90"}
+# Métrica primária por eixo de comparação (menor erro = melhor; o veredito usa o sinal do ganho).
+PRIMARY_METRIC = {"features": "rmse", "selection": "rmse"}
 
 # Folga de R² da regra de campeão "R² com folga, depois RMSE_P90": entre os
 # modelos a até CHAMPION_SLACK do melhor R², escolhe-se o de menor RMSE_P90.
@@ -114,6 +83,3 @@ MODEL_FAMILY = {
 # Colunas de controle negativo (materializadas pelo `prepare`).
 NOISE_COLUMN = "ctrl_noise"
 PERM_PREFIX = "perm_"
-
-# Subconjunto de nf_* de orografia de sub-grade (sem a máscara terra-mar).
-TOPOGRAPHY = ("nf_orog_height", "nf_sdor", "nf_isor", "nf_anor", "nf_slor", "nf_sdfor")

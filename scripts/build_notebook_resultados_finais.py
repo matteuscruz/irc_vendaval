@@ -187,7 +187,7 @@ import time
 from catboost import CatBoostRegressor
 from lightgbm import LGBMRegressor
 
-from src.feature_study import shap_groups as sg
+from src.feature_study.diagnostics import shap_groups as sg
 
 DADOS = LOCAL / "data"
 meta = json.loads((DADOS / "meta.json").read_text())

@@ -10,11 +10,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.feature_study.group_importance import (
+from src.feature_study.diagnostics.group_importance import (
     GRUPO_1, GRUPO_4, ROTULO_GRUPO, blocos_das_novas, blocos_por_variavel,
     permutacao_por_bloco, permutacao_por_faixa_horaria,
 )
-from src.feature_study.hourly_flat import hourly_flat_columns
+
+
+def hourly_flat_columns(variaveis, prefixo="hf_"):
+    """Nomes das 24 colunas horárias do desenho RAW (`hf_ws_h07`, `hfn_blh_h13`)."""
+    return [f"{prefixo}{v.removesuffix('_h')}_h{h:02d}" for v in variaveis for h in range(24)]
 
 
 class ModeloFalso:
@@ -75,7 +79,7 @@ def test_the_duplicated_pairs_are_declared_so_their_score_is_read_as_a_floor():
     medida no teste). Embaralhar um deles quase não dói, porque o modelo lê o
     outro — então a importância medida é um piso, não uma medida. Declarar o par
     é o que impede a leitura errada de "esta variável é inútil"."""
-    from src.feature_study.group_importance import GEMEO_NA_BASE
+    from src.feature_study.diagnostics.group_importance import GEMEO_NA_BASE
 
     assert GEMEO_NA_BASE["ws10"] == "ws_h"
     assert GEMEO_NA_BASE["t2m"] == "t2m_h"

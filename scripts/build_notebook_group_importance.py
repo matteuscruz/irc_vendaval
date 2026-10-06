@@ -49,7 +49,7 @@ import pandas as pd
 import seaborn as sns
 from lightgbm import LGBMRegressor
 
-from src.feature_study.group_importance import permutacao_por_bloco
+from src.feature_study.diagnostics.group_importance import permutacao_por_bloco
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 200)
@@ -73,7 +73,7 @@ print(f"{len(FEATURES)} features | treino {len(treino)} | teste {len(teste)} lin
 
 # BASE antiga (12 variáveis do ERA5 horário por estação) na hora do pico, SEM nenhum grupo:
 # o modelo "só BASE" treina nas mesmas linhas. Não entra em FEATURES.
-from src.feature_study.base_only import base_at_peak, base_columns
+from src.feature_study.data.base_only import base_at_peak, base_columns
 
 BASE_COLS = base_columns()
 picos = pd.read_parquet(RAIZ / "artifacts/feature_study/cluster3_groups/_cache/_daily_peak_cache.parquet",
@@ -89,7 +89,7 @@ def com_base(df):
 
 
 # seleção congelada (escolhida na validação): as 12 variáveis do arm `sel__val12`
-from src.feature_study.selected import columns_of, load_selection
+from src.feature_study.selection.selected import columns_of, load_selection
 
 SEL = load_selection(RAIZ / "config/selected_features_val12.json")
 SEL_COLS = columns_of(SEL["variables"], FEATURES)

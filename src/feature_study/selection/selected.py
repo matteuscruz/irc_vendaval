@@ -21,7 +21,7 @@ import json
 import re
 from pathlib import Path
 
-from src.feature_study.arms import SELECTION_AXIS, Arm
+from src.feature_study.core.arms import SELECTION_AXIS, Arm
 
 # Mesma redução de coluna → variável usada na análise por variável do notebook.
 _SUFIXOS = re.compile(

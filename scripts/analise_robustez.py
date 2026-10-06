@@ -31,9 +31,9 @@ sys.path.insert(0, str(RAIZ))
 from sklearn.cluster import KMeans  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
 
-from src.feature_study import robustness as rb  # noqa: E402
-from src.feature_study.analysis import load_arms  # noqa: E402
-from src.feature_study.config import MAIN_TAGS  # noqa: E402
+from src.feature_study.diagnostics import robustness as rb  # noqa: E402
+from src.feature_study.core.analysis import load_arms  # noqa: E402
+from src.feature_study.core.config import MAIN_TAGS  # noqa: E402
 from src.pipelines.common import TARGET_VAR  # noqa: E402
 
 REF = "era5_gust_max"

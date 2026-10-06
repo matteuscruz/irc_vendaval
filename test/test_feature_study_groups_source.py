@@ -11,9 +11,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.feature_study import groups_source as gs
-from src.feature_study.arms import build_arms, extra_comparisons
-from src.feature_study.hourly_flat import lookback_hours, purge_days
+from src.feature_study.data import groups_source as gs
+from src.feature_study.core.arms import build_arms, extra_comparisons
+from src.feature_study.data.purge import lookback_hours, purge_days
 
 ESTACOES = ["A504", "A509", "A515"]          # as 3 do cluster 9 da fixture sintética
 DIAS = pd.date_range("2016-01-01", "2019-12-31", freq="D")
@@ -238,9 +238,6 @@ def test_a_column_without_a_source_group_raises_instead_of_escaping_every_drop(r
         build_arms(base, new, [], ("anchors", "groups", "era5_groups"), group_of=g)
 
 
-def test_era5_groups_is_exclusive_with_the_other_modes_that_replace_the_base():
-    with pytest.raises(ValueError, match="exclusivos"):
-        build_arms(["a"], ["b"], [], ("anchors", "era5_groups", "hourly_raw"), group_of={"a": "grupo1", "b": "grupo2"})
 
 
 # ── Purga pelas defasagens do spec ──────────────────────────────────────────
@@ -259,15 +256,13 @@ def test_lag_suffixes_set_the_lookback_and_three_hours_means_one_purged_day():
 
 # ── prepare de ponta a ponta ────────────────────────────────────────────────
 
-def test_prepare_in_era5_groups_mode_builds_the_study_without_the_old_era5_files(
-    tmp_path, synthetic_shp_dir,
-):
+def test_prepare_builds_the_study_without_the_old_era5_files(tmp_path):
     """O ponto do modo: roda só com os quatro parquets e o INMET do alvo, sem
     `ERA5_Stratified`, `ERA5_Features_Basin` ou `era5_merged_cache` — que saíram
     de `dataset/raw`."""
     import json
 
-    from src.feature_study.prepare import prepare
+    from src.feature_study.core.prepare import prepare
     from test.conftest import build_synthetic_raw_dir
 
     raw = build_synthetic_raw_dir(tmp_path / "raw", DIAS)
@@ -275,7 +270,7 @@ def test_prepare_in_era5_groups_mode_builds_the_study_without_the_old_era5_files
         (raw / antigo).unlink(missing_ok=True)
     _escreve(raw)
 
-    meta = prepare(str(raw), str(synthetic_shp_dir), tmp_path / "estudo", cluster_id=9,
+    meta = prepare(str(raw), tmp_path / "estudo", cluster_id=9,
                    arm_sets=("anchors", "groups", "controls", "era5_groups"))
     data = tmp_path / "estudo" / "data"
 
@@ -310,3 +305,30 @@ def test_a_missing_group_file_is_reported_by_its_expected_name(tmp_path):
     gs.group_path(raw, "grupo2").unlink()
     assert not gs.is_available(raw)
     assert gs.group_path(raw, "grupo2").name == "features_grupo2_cluster3.parquet"
+
+
+def test_the_study_runs_from_prepare_to_aggregate_and_measures_group_effects(tmp_path):
+    """Ponta a ponta na estrutura por grupo: prepare → fit (Ridge) em todos os trimestres →
+    aggregate. Cobre o elo que os testes por módulo não pegam: os arms que o prepare grava
+    são os que o worker ajusta e os que a análise compara."""
+    from sklearn.linear_model import Ridge
+
+    from src.feature_study.core.analysis import load_arms, run_aggregate
+    from src.feature_study.core.prepare import prepare
+    from src.feature_study.core.worker import run_unit
+    from test.conftest import build_synthetic_raw_dir
+
+    raw = build_synthetic_raw_dir(tmp_path / "raw", DIAS)
+    _escreve(raw)
+    estudo = tmp_path / "estudo"
+    prepare(str(raw), estudo, cluster_id=9, arm_sets=("anchors", "groups", "controls"))
+    arms = [a for a in load_arms(estudo / "data") if a.name in ("base", "full", "drop_grp__grupo2", "ctrl__noise")]
+    assert len(arms) == 4
+    for season in ("DJF", "MAM", "JJA", "SON"):
+        run_unit(estudo / "data", estudo, "full", season, arms, regressors=[Ridge], seed=42, out_tag="full")
+
+    res = run_aggregate(estudo, estudo / "data", ["full"], label="t", n_boot=50)
+    eff = res["effects"]
+    comparacoes = set(eff["comparison"])
+    assert {"full_vs_base", "drop_grp__grupo2", "ctrl__noise"} <= comparacoes
+    assert (estudo / "summary" / "t" / "effects.csv").exists()

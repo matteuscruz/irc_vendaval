@@ -10,7 +10,7 @@ import pytest
 from lightgbm import LGBMRegressor
 from sklearn.neural_network import MLPRegressor
 
-from src.feature_study import shap_groups as sg
+from src.feature_study.diagnostics import shap_groups as sg
 
 
 def _dados(n=600, seed=0):

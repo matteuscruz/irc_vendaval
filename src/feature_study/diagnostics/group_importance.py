@@ -31,7 +31,22 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import root_mean_squared_error
 
-from src.feature_study.hourly_flat import base_variable_of
+
+# Nomes de colunas do desenho RAW horário (`hf_ws_h07`, `hfn_blh_h13`), mantidos só para
+# ler os notebooks e resultados anteriores (`cluster3_raw`). A estrutura por grupo não os usa.
+HOURLY_FLAT_PREFIX = "hf_"
+HOURLY_FLAT_NEW_PREFIX = "hfn_"
+
+
+def base_variable_of(column: str) -> str:
+    """`hf_ws_h07` → `ws_h`; `hfn_blh_h13` → `blh`."""
+    for prefix in (HOURLY_FLAT_NEW_PREFIX, HOURLY_FLAT_PREFIX):
+        if column.startswith(prefix):
+            raiz = column[len(prefix):].rsplit("_h", 1)[0]
+            if prefix == HOURLY_FLAT_NEW_PREFIX:
+                return raiz
+            return raiz if raiz.startswith("tp_roll") else f"{raiz}_h"
+    return column
 
 # Grupos conforme o SPEC (`features_grupos_1_e_4.md`, Tabelas 1 e 4 de
 # `ERA5_INMET_Gust_BiasCorrection_ML_Technical_Spec.pdf` v1.0), que é a fonte
@@ -46,7 +61,7 @@ SEM_GRUPO = ("cape",)
 # Variáveis do grupo 1 que chegam ao modelo pela BASE horária por estação
 # (`hf_*`), não pela grade. O spec as lista no grupo 1; o estudo as classificou
 # como base só por causa da fonte do arquivo.
-# Sufixo `_h`: é como `hourly_flat.base_variable_of` nomeia as colunas da base
+# Sufixo `_h`: é como `base_variable_of` nomeia as colunas da base
 # (`hf_ws_h12` → `ws_h`), para não colidir com a versão de grade (`hfn_t2m_h12`
 # → `t2m`). Os dois nomes coexistem de propósito — são as duas fontes.
 GRUPO_1_NA_BASE = ("ws_h", "t2m_h", "td_dep_h")

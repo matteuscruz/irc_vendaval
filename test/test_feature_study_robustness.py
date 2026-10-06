@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.feature_study import robustness as rb
-from src.feature_study.analysis import _draw_metrics, make_blocks
+from src.feature_study.diagnostics import robustness as rb
+from src.feature_study.core.analysis import _draw_metrics, make_blocks
 
 
 def _teste(n_dias=60, estacoes=("A", "B", "C"), seed=0):

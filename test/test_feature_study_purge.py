@@ -1,9 +1,7 @@
 """Purga temporal nas fronteiras de mês (`prepare.purge_split_boundaries`).
 
-Até aqui o estudo não purgava nada, e não precisava: as 40 features diárias
-eram todas do próprio dia. No desenho RAW isso deixa de valer — `tp_roll24h`,
-`tp_roll48h` e `tp_roll72h` olham para trás e atravessam a fronteira entre
-meses de treino e de teste.
+As features com defasagem (`*_lag1h`, `*_max_prev3h`, `*_delta3h`, `mslp_tend_3h`)
+olham para trás e atravessam a fronteira entre meses de treino e de teste.
 
 Sintético e leve: calendário montado à mão, resposta conhecida de antemão.
 """
@@ -12,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.feature_study.hourly_flat import hourly_flat_columns, purge_days
-from src.feature_study.prepare import purge_split_boundaries
+from src.feature_study.core.prepare import purge_split_boundaries
+from src.feature_study.data.purge import purge_days
 
 MESES_TESTE = (1, 4, 7, 10)
 # Meses de treino que vêm LOGO DEPOIS de um mês de teste — é neles que o
@@ -85,9 +83,8 @@ def test_validation_blocks_are_purged_against_their_neighbours_too():
     assert val[val["time"].dt.day <= 3].empty          # março começa colado em fevereiro (treino)
 
 
-def test_gap_of_zero_is_a_no_op_so_the_daily_study_is_untouched():
-    """O estudo diário não tem nenhuma feature que olhe para trás; purgar lá
-    descartaria linhas sem motivo e mudaria resultados já publicados."""
+def test_gap_of_zero_is_a_no_op():
+    """Sem nenhuma feature que olhe para trás, purgar descartaria linhas sem motivo."""
     pop = _calendario()
     out, removidas = purge_split_boundaries(pop, 0)
     assert removidas == 0
@@ -95,11 +92,12 @@ def test_gap_of_zero_is_a_no_op_so_the_daily_study_is_untouched():
 
 
 def test_purge_days_is_derived_from_the_features_not_hardcoded():
-    """Fixar o gap em 3 deixaria um vazamento silencioso no dia em que uma
-    feature com lag maior entrasse no estudo."""
+    """Fixar o gap deixaria um vazamento silencioso no dia em que uma feature com
+    defasagem maior entrasse no estudo."""
     assert purge_days(["b1", "b2", "latitude"]) == 0
-    assert purge_days(hourly_flat_columns(("ws_h", "tp_roll24h"))) == 1
-    assert purge_days(hourly_flat_columns(("ws_h", "tp_roll72h"))) == 3
+    assert purge_days(["w10", "gust10fg_lag1h"]) == 1
+    assert purge_days(["w10", "blh_max_prev3h"]) == 1                # 3 h alcançam o dia anterior
+    assert purge_days(["w10", "x_delta48h"]) == 2                    # 48 h pedem 2 dias
 
 
 def test_all_rows_share_one_gap_so_every_arm_keeps_the_same_row_ids():

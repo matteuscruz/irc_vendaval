@@ -8,18 +8,17 @@ motivou o estudo.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.feature_study.analysis import (
+from src.feature_study.core.analysis import (
     benjamini_hochberg, compare_units, compute_effects, effects_by_season,
     make_blocks, ranking_features, run_aggregate,
 )
-from src.feature_study.arms import build_arms
-from src.feature_study.config import REFERENCE_MODELS
+from src.feature_study.core.arms import build_arms
+from src.feature_study.core.config import REFERENCE_MODELS
 from src.pipelines.common import TARGET_VAR
 
 SEASON_OF_MONTH = {1: "DJF", 4: "MAM", 7: "JJA", 10: "SON"}
@@ -59,7 +58,8 @@ def _write(tmp_path, scales=SCALES, tags=("r0", "r1", "r2"), seed=0, identical=(
     data = tmp_path / "data"
     data.mkdir()
     test.to_parquet(data / "test.parquet", index=False)
-    arms = build_arms(("x",), ("nf_a", "nf_b", "nf_c"), (), ("core", "controls"))
+    grupo = {"x": "grupo1", "nf_a": "grupo2", "nf_b": "grupo2", "nf_c": "grupo3"}
+    arms = build_arms(("x",), ("nf_a", "nf_b", "nf_c"), (), ("core", "controls"), group_of=grupo)
     (data / "arms.json").write_text(json.dumps([a.to_dict() for a in arms]))
 
     for tag in tags:
@@ -177,7 +177,7 @@ def test_a_model_missing_from_one_arm_is_dropped_only_for_that_comparison(tmp_pa
 
 
 def test_leaderboard_exposes_nonfinite_counts(tmp_path):
-    from src.feature_study.analysis import models_leaderboard
+    from src.feature_study.core.analysis import models_leaderboard
 
     d = tmp_path / "units" / "t"
     d.mkdir(parents=True)
@@ -331,7 +331,7 @@ def _write_metrics(out, tag, seed, et_rmse):
 
 
 def test_seed_sensitivity_flags_only_the_models_the_seed_changes(tmp_path):
-    from src.feature_study.analysis import seed_sensitivity
+    from src.feature_study.core.analysis import seed_sensitivity
 
     for tag, seed, et in (("s42", 42, 2.10), ("s43", 43, 2.16), ("s44", 44, 2.04)):
         _write_metrics(tmp_path, tag, seed, et)
@@ -344,7 +344,7 @@ def test_seed_sensitivity_flags_only_the_models_the_seed_changes(tmp_path):
 
 
 def test_seed_sensitivity_needs_at_least_two_seeds(tmp_path):
-    from src.feature_study.analysis import seed_sensitivity
+    from src.feature_study.core.analysis import seed_sensitivity
 
     _write_metrics(tmp_path, "s42", 42, 2.1)
     assert seed_sensitivity(tmp_path, ["s42"]).empty
@@ -369,116 +369,14 @@ def test_aggregate_writes_per_seed_tables_only_when_there_are_several_seeds(tmp_
 
 # ── Eixo de perda ───────────────────────────────────────────────────────────
 
-def _write_loss_axis(tmp_path, tags=("r0", "r1"), shift=0.9, seed=3):
-    """Resíduos com a assinatura MEDIDA no piloto: o braço de perda melhora a
-    CAUDA e piora o RMSE global.
-
-    A base recebe viés de cauda negativo (subestima os extremos, como o ERA5);
-    o braço de perda soma `shift`, o que aproxima de zero o resíduo na cauda e
-    afasta no resto. Os arms de perda só têm os 3 modelos de LOSS_MODELS — é
-    assim que eles saem do `fit`.
-    """
-    from src.feature_study.arms import build_loss_arms
-    from src.feature_study.config import LOSS_MODELS
-
-    rng = np.random.default_rng(seed)
-    test = _test_frame()
-    data = tmp_path / "data"
-    data.mkdir()
-    test.to_parquet(data / "test.parquet", index=False)
-
-    feature_arms = build_arms(("x",), ("nf_a",), (), ("core",))
-    loss_arms = build_loss_arms({"full": ("x", "nf_a")}, keys=("exp90", "huber44"))
-    arms = feature_arms + loss_arms
-    (data / "arms.json").write_text(json.dumps([a.to_dict() for a in arms]))
-
-    y = test[TARGET_VAR].to_numpy(float)
-    cauda = y >= np.quantile(y, 0.9)
-    for tag in tags:
-        (tmp_path / "units" / tag).mkdir(parents=True)
-        base_e = {m: np.where(cauda, -3.0, 0.0) + 1.5 * rng.standard_normal(len(test))
-                  for m in REFERENCE_MODELS}
-        for a in arms:
-            modelos = LOSS_MODELS if a.axis == "loss" else REFERENCE_MODELS
-            for season in test["season"].unique():
-                mask = (test["season"] == season).to_numpy()
-                cols = {m: (base_e[m] + (shift if a.axis == "loss" else 0.0))[mask].astype("float32")
-                        for m in modelos}
-                pd.DataFrame({"row_id": test.loc[mask, "row_id"].to_numpy(), **cols}).to_parquet(
-                    tmp_path / "units" / tag / f"resid__{season}__{a.name}.parquet", index=False)
-    return tmp_path, data, arms
 
 
-def test_adding_the_loss_axis_does_not_move_the_q_values_of_the_feature_axis():
-    """A GUARDA DE REGRESSÃO do plano. O Benjamini-Hochberg multiplica o p pelo
-    número de hipóteses da família: jogar os braços de perda na mesma família
-    das features mudaria TODO `q_bh` já publicado do eixo de features, sem erro
-    nenhum e sem refazer um único ajuste."""
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as d:
-        out, data, arms = _write_loss_axis(Path(d))
-        so_features = [a for a in arms if a.axis == "features"]
-
-        sem = compute_effects(out, data, ["r0", "r1"], so_features, n_boot=200)
-        com = compute_effects(out, data, ["r0", "r1"], arms, n_boot=200)
-
-    chaves = ["comparison", "family", "metric"]
-    a = sem.set_index(chaves)[["q_bh", "sesoi", "verdict", "effect"]]
-    b = com[com["axis"] == "features"].set_index(chaves)[["q_bh", "sesoi", "verdict", "effect"]]
-
-    assert set(a.index) == set(b.index)
-    pd.testing.assert_frame_equal(a, b.loc[a.index])
 
 
-def test_the_loss_axis_is_judged_on_the_tail_and_not_on_the_global_rmse(tmp_path):
-    """Um modelo expectila PERDE em RMSE por construção — deixa de estimar a
-    média condicional. Julgar o eixo de perda por RMSE o condenaria sempre; a
-    métrica primária dele é `rmse_p90`."""
-    out, data, arms = _write_loss_axis(tmp_path)
-    eff = compute_effects(out, data, ["r0", "r1"], arms, n_boot=300)
-
-    perda = eff[(eff["comparison"] == "full__exp90") & (eff["family"] == "all")]
-    cauda = perda[perda["metric"] == "rmse_p90"].iloc[0]
-    global_ = perda[perda["metric"] == "rmse"].iloc[0]
-
-    assert cauda["effect"] > 0 and cauda["verdict"] != ""     # julgado na cauda
-    assert global_["effect"] < 0                              # e paga no global
-    assert global_["verdict"] == ""                           # que não é o veredito
 
 
-def test_loss_comparisons_only_average_the_models_that_can_change_loss(tmp_path):
-    """ExtraTrees, RandomForest e Ridge não aceitam trocar a perda, então as
-    famílias `bagging`/`linear` não têm nada a promediar nesse eixo. `n_models`
-    é o que torna essa assimetria legível em vez de invisível."""
-    from src.feature_study.config import LOSS_MODELS
-
-    out, data, arms = _write_loss_axis(tmp_path)
-    eff = compute_effects(out, data, ["r0", "r1"], arms, n_boot=100)
-
-    perda = eff[(eff["comparison"] == "full__exp90") & (eff["metric"] == "rmse_p90")]
-    assert set(perda["family"]) == {"boosting", "all"}
-    assert (perda["n_models"] == len(LOSS_MODELS)).all()
-
-    features = eff[(eff["comparison"] == "add__nf_a") & (eff["metric"] == "rmse")]
-    assert {"bagging", "linear"} <= set(features["family"])
 
 
-def test_the_loss_frontier_puts_the_tail_gain_next_to_the_rmse_it_costs(tmp_path):
-    """A cauda não é de graça: a fronteira só é útil se o preço estiver na MESMA
-    linha do ganho, senão a tabela vira um argumento de um lado só."""
-    from src.feature_study.analysis import loss_frontier
-
-    out, data, arms = _write_loss_axis(tmp_path)
-    eff = compute_effects(out, data, ["r0", "r1"], arms, n_boot=200)
-    fr = loss_frontier(eff).set_index("comparison")
-
-    assert set(fr.index) == {"full__exp90", "full__huber44"}
-    linha = fr.loc["full__exp90"]
-    assert linha["rmse_p90_gain"] > 0
-    assert linha["rmse_cost"] > 0
-    assert linha["bias_p90_shift"] > 0                        # menos subestimação
-    assert linha["ci_lo"] < linha["rmse_p90_gain"] < linha["ci_hi"]
 
 
 def test_champion_rule_with_r2_slack_buys_the_tail_when_the_r2_costs_little(tmp_path):
@@ -487,7 +385,7 @@ def test_champion_rule_with_r2_slack_buys_the_tail_when_the_r2_costs_little(tmp_
     deixa trocar um R² irrelevante por cauda — mas só até o limite, senão se
     elege um modelo ruim (medido no DJF: a melhor cauda era o RANSAC, R²=−0,349).
     """
-    from src.feature_study.analysis import champion_rules
+    from src.feature_study.core.analysis import champion_rules
 
     units = tmp_path / "units" / "r0"
     units.mkdir(parents=True)
@@ -513,20 +411,6 @@ def test_champion_rule_with_r2_slack_buys_the_tail_when_the_r2_costs_little(tmp_
     assert apertada["r2_slack_then_rmse_p90"] == "Comprimido"
 
 
-def test_aggregate_writes_the_loss_outputs_only_when_the_loss_axis_ran(tmp_path):
-    """Uma execução só de features tem de gravar exatamente o que gravava antes
-    do eixo de perda existir."""
-    (tmp_path / "com").mkdir()
-    out, data, arms = _write_loss_axis(tmp_path / "com")
-    run_aggregate(out, data, ["r0", "r1"], label="t", n_boot=50)
-    assert (out / "summary" / "t" / "loss_frontier.csv").exists()
-    assert (out / "summary" / "t" / "loss_by_model.csv").exists()
-
-    (tmp_path / "sem").mkdir()
-    out2, data2, _ = _write(tmp_path / "sem", tags=("r0",))
-    run_aggregate(out2, data2, ["r0"], label="t", n_boot=50)
-    assert not (out2 / "summary" / "t" / "loss_frontier.csv").exists()
-    assert (out2 / "summary" / "t" / "effects.csv").exists()
 
 
 # ── Cobertura parcial: cada modelo só existe nos trimestres em que foi eleito ──
@@ -536,7 +420,7 @@ def test_a_model_covering_only_some_seasons_is_measured_not_discarded(tmp_path):
     eleito. Exigir cobertura de TODAS as linhas do teste deixava só a interseção
     dos quatro trimestres — na execução real, um único modelo — e o efeito
     pareado passava a repousar nele, com incerteza subestimada."""
-    from src.feature_study.analysis import _masked_draws
+    from src.feature_study.core.analysis import _masked_draws
 
     test = pd.DataFrame({
         "year": [2000] * 6 + [2001] * 6, "month": [1] * 6 + [4] * 6,
@@ -554,7 +438,7 @@ def test_a_model_covering_only_some_seasons_is_measured_not_discarded(tmp_path):
 def test_masked_metrics_equal_the_full_metrics_when_coverage_is_complete():
     """A guarda de regressão: um estudo com todos os modelos em todas as linhas
     (o desenho antigo) tem de dar exatamente o mesmo resultado de antes."""
-    from src.feature_study.analysis import _draw_metrics, _masked_draws, make_blocks
+    from src.feature_study.core.analysis import _draw_metrics, _masked_draws, make_blocks
 
     rng = np.random.default_rng(3)
     test = pd.DataFrame({"year": np.repeat([2000, 2001, 2002], 40), "month": np.tile([1, 4], 60),
@@ -571,7 +455,7 @@ def test_a_pair_covering_different_rows_is_skipped_instead_of_mixing_seasons(tmp
     """Se o arm pior e o melhor cobrem linhas diferentes (uma unidade incompleta),
     a diferença misturaria trimestres. O par é descartado em silêncio seguro, não
     comparado."""
-    from src.feature_study.analysis import _masked_draws
+    from src.feature_study.core.analysis import _masked_draws
 
     test = pd.DataFrame({"year": [2000] * 4 + [2001] * 4, "month": [1] * 4 + [4] * 4,
                          "daily_wind_gust_max": np.arange(8, dtype=float) + 1})
@@ -584,7 +468,7 @@ def test_a_pair_covering_different_rows_is_skipped_instead_of_mixing_seasons(tmp
 def test_discover_models_returns_every_model_that_has_residuals(tmp_path):
     """O modo top-5 mede os modelos que a triagem elegeu, e não só os 7 de
     referência fixados a priori."""
-    from src.feature_study.analysis import discover_models
+    from src.feature_study.core.analysis import discover_models
 
     pasta = tmp_path / "units" / "full"
     pasta.mkdir(parents=True)

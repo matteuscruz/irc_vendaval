@@ -13,7 +13,7 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))
 
-from src.feature_study.selected import columns_of, fingerprint  # noqa: E402
+from src.feature_study.selection.selected import columns_of, fingerprint  # noqa: E402
 
 VARIAVEIS = {
     "grupo1": ["gust", "gust10fg", "hora_solar_sin", "v10", "v100", "w10", "w100"],

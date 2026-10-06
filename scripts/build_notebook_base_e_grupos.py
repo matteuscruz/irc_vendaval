@@ -78,8 +78,8 @@ As cores abaixo se repetem em todo o notebook.
 """)
 
 py("""
-from src.feature_study.group_importance import DESCRICAO, GEMEO_NA_BASE, ROTULO_GRUPO
-from src.feature_study.hourly_flat import base_variable_of
+from src.feature_study.diagnostics.group_importance import DESCRICAO, GEMEO_NA_BASE, ROTULO_GRUPO
+from src.feature_study.diagnostics.group_importance import base_variable_of
 
 UNIDADE = {
     "ws_h": "m/s", "sin_dir_h": "", "cos_dir_h": "", "msl_h": "Pa", "t2m_h": "K",

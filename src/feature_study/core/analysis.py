@@ -34,9 +34,9 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from src.feature_study.arms import SELECTION_AXIS, SELECTION_EXTRA, Arm, extra_comparisons
-from src.feature_study.config import (
-    BOOTSTRAP_DRAWS, BOOTSTRAP_SEED, CHAMPION_SLACK, LOSS_MODELS, MODEL_FAMILY,
+from src.feature_study.core.arms import SELECTION_AXIS, SELECTION_EXTRA, Arm, extra_comparisons
+from src.feature_study.core.config import (
+    BOOTSTRAP_DRAWS, BOOTSTRAP_SEED, CHAMPION_SLACK, MODEL_FAMILY,
     PRIMARY_METRIC, REFERENCE_MODELS, SESOI_REL,
 )
 from src.pipelines.common import TARGET_VAR
@@ -332,73 +332,6 @@ def _verdict(r) -> str:
     return "inconclusivo"
 
 
-def loss_frontier(effects: pd.DataFrame) -> pd.DataFrame:
-    """Uma linha por braço de perda: o que se ganha na cauda e o que se PAGA no
-    global.
-
-    A cauda não é de graça — uma perda assimétrica deixa de estimar a média
-    condicional e piora o RMSE por construção. Pôr ganho e preço na mesma linha
-    é o que torna a tabela uma fronteira de escolha em vez de um argumento de um
-    lado só. `tail_gain_per_rmse_cost` é a taxa de troca; abaixo de 1 a cauda
-    sai cara.
-    """
-    if effects.empty or "axis" not in effects or not (effects["axis"] == "loss").any():
-        return pd.DataFrame()
-    eff = effects[(effects["axis"] == "loss") & (effects["family"] == "all")]
-    por_metrica = {m: g.set_index("comparison") for m, g in eff.groupby("metric")}
-    cauda = por_metrica["rmse_p90"]
-
-    out = pd.DataFrame({
-        "reference": cauda["worse"],
-        "loss": [c.split("__")[-1] for c in cauda.index],
-        "rmse_p90_gain": cauda["effect"],
-        "ci_lo": cauda["ci_lo"], "ci_hi": cauda["ci_hi"],
-        "q_bh": cauda["q_bh"], "sesoi": cauda["sesoi"], "verdict": cauda["verdict"],
-        "n_models": cauda["n_models"],
-    })
-    # Sinal: `effect` já é ganho (positivo = melhor). O RMSE global é preço, por
-    # isso entra invertido.
-    out["rmse_cost"] = -por_metrica["rmse"]["effect"].reindex(out.index)
-    out["r2_cost"] = -por_metrica["r2"]["effect"].reindex(out.index)
-    out["bias_p90_shift"] = por_metrica["bias_p90"]["effect"].reindex(out.index)
-    out["tail_gain_per_rmse_cost"] = out["rmse_p90_gain"] / out["rmse_cost"].replace(0, np.nan)
-    return out.reset_index().sort_values("rmse_p90_gain", ascending=False)
-
-
-def loss_by_model(out_dir, data_dir, tags, arms=None, models=REFERENCE_MODELS) -> pd.DataFrame:
-    """Efeito de cada perda POR MODELO (ponto, sem IC).
-
-    A média da família esconde que os modelos não respondem igual: o XGBoost
-    reage bem menos a `tau` que CatBoost e LightGBM, e diluiria a média sem
-    que ninguém visse. Esconder um modelo que não responde seria selecionar
-    pelo resultado; mostrá-lo por linha é o contrário disso.
-    """
-    arms = arms or load_arms(data_dir)
-    de_perda = [a for a in arms if a.axis == "loss"]
-    if not de_perda:
-        return pd.DataFrame()
-    test = load_test(data_dir)
-    blocks = make_blocks(test)
-    resid = load_residuals(out_dir, tags, [a.name for a in arms], test, models)
-    counts = np.ones((1, blocks.nb))
-
-    rows = []
-    for a in de_perda:
-        for m in models:
-            for t in tags:
-                ew, eb = resid.get((t, a.reference, m)), resid.get((t, a.name, m))
-                if ew is None or eb is None or not (np.isfinite(ew).all() and np.isfinite(eb).all()):
-                    continue
-                w, b = (_draw_metrics(counts, e, blocks) for e in (ew, eb))
-                rows.append({"comparison": a.name, "reference": a.reference, "loss": a.loss,
-                             "model": m, "tag": t,
-                             **{k: float(_delta(k, w[k], b[k])[0]) for k in METRICS}})
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    return df.groupby(["comparison", "reference", "loss", "model"], as_index=False)[list(METRICS)].mean()
-
-
 CHAMPION_RULES = ("r2", "rmse_p90", "r2_slack_then_rmse_p90")
 
 
@@ -676,7 +609,7 @@ def top_models_payload(top: pd.DataFrame, *, arm="base", k=5, slack=CHAMPION_SLA
     escolha, uma seed a mais no volume mudaria o conjunto de modelos no meio do
     fan-out e metade dos arms sairia com modelos diferentes da outra metade.
     """
-    from src.feature_study.worker import _models_fingerprint
+    from src.feature_study.core.worker import _models_fingerprint
 
     by_season = {s: list(g.sort_values("rank")["model"]) for s, g in top.groupby("season")}
     todos = sorted({m for ms in by_season.values() for m in ms})
@@ -759,24 +692,16 @@ def run_aggregate(out_dir, data_dir, tags, label: str = "main", n_boot: int = BO
     champions(out_dir, tags).to_csv(dest / "champions.csv", index=False)
     plot_ranking(rank_f, dest / "ranking_features.png")
 
-    # Regras de campeão: medição, roda sempre (independe do eixo de perda).
+    # Regras de campeão: medição, roda sempre.
     picks, resumo = champion_rules(out_dir, tags)
     if not picks.empty:
         picks.to_csv(dest / "champion_rules.csv", index=False)
         resumo.to_csv(dest / "champion_rules_summary.csv", index=False)
 
-    # Saídas do eixo de perda só quando ele existe — uma execução só de features
-    # continua gravando exatamente o que gravava antes.
-    frontier = loss_frontier(effects)
-    if not frontier.empty:
-        frontier.to_csv(dest / "loss_frontier.csv", index=False)
-        loss_by_model(out_dir, data_dir, tags, arms).to_csv(dest / "loss_by_model.csv", index=False)
-
     (dest / "meta.json").write_text(json.dumps({"tags": list(tags), "n_boot": n_boot,
                                                 "reference_models": list(REFERENCE_MODELS),
                                                 "sesoi_rel": SESOI_REL,
                                                 "primary_metric": PRIMARY_METRIC,
-                                                "loss_models": list(LOSS_MODELS),
                                                 "champion_slack": CHAMPION_SLACK}, indent=2))
     return {"effects": effects, "ranking_features": rank_f, "ranking_groups": rank_g,
-            "loss_frontier": frontier, "champion_rules": resumo}
+            "champion_rules": resumo}

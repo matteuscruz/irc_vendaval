@@ -30,8 +30,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src.feature_study.analysis import _verdict, comparisons, discover_models, load_residuals
-from src.feature_study.config import BOOTSTRAP_SEED, SESOI_REL
+from src.feature_study.core.analysis import _verdict, comparisons, discover_models, load_residuals
+from src.feature_study.core.config import BOOTSTRAP_SEED, SESOI_REL
 from src.pipelines.common import TARGET_VAR
 
 TAIL_QS = (0.90, 0.95, 0.99)
@@ -307,7 +307,7 @@ def paired_effects(
 
 def load_study(out_dir, data_dir, tags, arms):
     """`(test, resid, models, comps, dias)` do estudo gravado em `out_dir`."""
-    from src.feature_study.analysis import load_test
+    from src.feature_study.core.analysis import load_test
 
     test = load_test(data_dir)
     models = discover_models(out_dir, tags)

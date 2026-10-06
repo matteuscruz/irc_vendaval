@@ -5,11 +5,11 @@
                arms), LazyPredict inteiro (39 modelos) sobre o treino COMPLETO.
     aggregate  1 container: efeitos pareados, IC por blocos, ranking.
 
-Sem amostragem: o cluster 3 tem só ~6 mil linhas de treino por trimestre (ver
-`src/feature_study/config.py`). Com seeds fixas e dados completos não há réplicas.
+Sem amostragem: o cluster 3 tem só ~6 mil linhas de treino por trimestre. Com seeds
+fixas e dados completos não há réplicas.
 
-Somente o cluster 3 e seeds fixas (`src/feature_study/config.py`): nada disso é
-flag. Tudo vive no volume de artefatos em `feature_study/cluster3/`.
+Somente o cluster 3 e seeds fixas (`src/feature_study/core/config.py`): nada disso é
+flag. Tudo vive no volume de artefatos em `feature_study/<--study>/`.
 
     modal run src/modal/feature_study.py --stage prepare
     modal run src/modal/feature_study.py --stage pilot       # custo e determinismo
@@ -113,16 +113,16 @@ def _bootstrap() -> None:
 )
 def prepare_remote(arm_sets: str = "anchors,groups,controls", study: str = DEFAULT_STUDY) -> dict:
     _bootstrap()
-    from src.feature_study.prepare import prepare
+    from src.feature_study.core.prepare import prepare
 
     artifact_volume.reload()
     meta = prepare(
-        f"{REMOTE_DATASET_DIR}/raw", f"{REMOTE_DATASET_DIR}/shp", _study(study),
+        f"{REMOTE_DATASET_DIR}/raw", _study(study),
         arm_sets=tuple(s for s in arm_sets.split(",") if s),
     )
     _commit_safe()
     return {k: meta[k] for k in (
-        "n_arms", "sampling", "n_test_rows", "n_trainval_rows", "train_rows_per_season",
+        "n_arms", "n_test_rows", "n_trainval_rows", "train_rows_per_season",
         "rows_before_completeness", "rows_after_completeness",
         "clusters_dropped_by_coverage", "purge_days", "rows_purged",
     )}
@@ -131,7 +131,7 @@ def prepare_remote(arm_sets: str = "anchors,groups,controls", study: str = DEFAU
 @app.function(image=image, volumes=_VOLUMES, timeout=600, memory=4096)
 def list_arms(study: str = DEFAULT_STUDY) -> list[str]:
     _bootstrap()
-    from src.feature_study.analysis import load_arms
+    from src.feature_study.core.analysis import load_arms
 
     artifact_volume.reload()
     return [a.name for a in load_arms(_study(study) / "data")]
@@ -146,8 +146,8 @@ def add_arms_remote(selection_json: str, study: str = DEFAULT_STUDY) -> list[str
     _bootstrap()
     import json
 
-    from src.feature_study.analysis import load_arms
-    from src.feature_study.selected import append_arms, build_selected_arms
+    from src.feature_study.core.analysis import load_arms
+    from src.feature_study.selection.selected import append_arms, build_selected_arms
 
     artifact_volume.reload()
     data = _study(study) / "data"
@@ -168,9 +168,9 @@ def fit_unit(tag: str, season: str, arm_names: list[str], models: str = "all",
              study: str = DEFAULT_STUDY) -> dict:
     """Um trimestre, uma amostra, uma seed, um lote de arms — no próprio container."""
     _bootstrap()
-    from src.feature_study.analysis import load_arms
-    from src.feature_study.config import MODEL_SEED
-    from src.feature_study.worker import run_unit
+    from src.feature_study.core.analysis import load_arms
+    from src.feature_study.core.config import MODEL_SEED
+    from src.feature_study.core.worker import run_unit
     seed = MODEL_SEED if seed is None else seed
 
     artifact_volume.reload()
@@ -241,7 +241,7 @@ def screen_remote(tags: list[str], arm: str = "base", k: int = 5,
     _bootstrap()
     import json
 
-    from src.feature_study.analysis import top_models_by_season, top_models_payload
+    from src.feature_study.core.analysis import top_models_by_season, top_models_payload
 
     artifact_volume.reload()
     study = _study(study)
@@ -271,7 +271,7 @@ def screen_remote(tags: list[str], arm: str = "base", k: int = 5,
 def aggregate_remote(tags: list[str], label: str = "main", n_boot: int = 2000,
                      study: str = DEFAULT_STUDY) -> list[str]:
     _bootstrap()
-    from src.feature_study.analysis import run_aggregate
+    from src.feature_study.core.analysis import run_aggregate
 
     artifact_volume.reload()
     study = _study(study)
@@ -284,7 +284,7 @@ def aggregate_remote(tags: list[str], label: str = "main", n_boot: int = 2000,
 @app.function(image=image, volumes=_VOLUMES, timeout=600, memory=4096)
 def compare_remote(tag_a: str, tag_b: str, study: str = DEFAULT_STUDY) -> float:
     _bootstrap()
-    from src.feature_study.analysis import compare_units
+    from src.feature_study.core.analysis import compare_units
 
     artifact_volume.reload()
     return compare_units(_study(study), tag_a, tag_b)
@@ -304,7 +304,7 @@ def _run_fit(seeds: list[int], arm_names: list[str], models: str, chunk_size: in
     os dois gravam o mesmo nome de arquivo para o arm `base`, e sem a separação o
     estudo (5 modelos) sobrescrevia a triagem (39) — como aconteceu no
     `cluster3_raw`."""
-    from src.feature_study.config import seed_tag, triage_tag
+    from src.feature_study.core.config import seed_tag, triage_tag
     tag_de = triage_tag if triage else seed_tag
 
     seasons = ("DJF", "MAM", "JJA", "SON")
@@ -389,10 +389,6 @@ def main(
                  `singles`  = a varredura base+f / full−f, uma por feature. OPT-IN:
                               é ela que produz ~100 arms. Rode-a depois, restrita ao
                               grupo que venceu. `core` é o alias de anchors+singles.
-                 `losses`   = eixo de perda (10 arms). Opt-in, multiplica o fan-out.
-                 `hourly_raw` = troca a BASE pelo perfil horário CRU (24 colunas por
-                              variável, `hf_`/`hfn_`). Nada de diário. Exclusivo com
-                              `hourly` e `hourly_only`.
     --arms       Restringe o fit a arms específicos (nomes separados por vírgula)
     --models     all (39, padrão) | reference (7) | fast3 (3) | top5 (a triagem)
     --seeds      Seeds do fit, separadas por vírgula (padrão: as 5 de MODEL_SEEDS; unidades prontas são puladas)
@@ -414,7 +410,7 @@ def main(
     root = str(Path(__file__).resolve().parents[2])
     if root not in sys.path:
         sys.path.insert(0, root)
-    from src.feature_study.config import MAIN_TAGS, MODEL_SEEDS, triage_tag
+    from src.feature_study.core.config import MAIN_TAGS, MODEL_SEEDS, triage_tag
     tag_list = [t for t in tags.split(",") if t] or list(MAIN_TAGS)
     seed_list = [int(s) for s in seeds.split(",") if s] or list(MODEL_SEEDS)
     # `screen` lê a pasta da TRIAGEM (<tag>_triage) por padrão. Para uma triagem
@@ -424,8 +420,7 @@ def main(
     if stage in ("prepare", "all"):
         print("prepare: carregando dados e amostrando...", flush=True)
         meta = prepare_remote.remote(arm_sets, study)
-        print(f"prepare ok: {meta['n_arms']} arms | teste {meta['n_test_rows']} linhas | "
-              f"amostragem: {'ligada' if meta['sampling'] else 'desligada (treino completo)'}")
+        print(f"prepare ok: {meta['n_arms']} arms | teste {meta['n_test_rows']} linhas | treino completo")
         print(f"  treino por trimestre: {meta['train_rows_per_season']}")
         print(f"  linhas antes/depois da completude: {meta['rows_before_completeness']} → "
               f"{meta['rows_after_completeness']}")

@@ -19,11 +19,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.feature_study.analysis import load_arms, run_aggregate  # noqa: E402
-from src.feature_study.arms import DEFAULT_ARM_SETS  # noqa: E402
-from src.feature_study.config import MAIN_TAGS, MODEL_SEED, SEASONS, seed_tag  # noqa: E402
-from src.feature_study.prepare import prepare  # noqa: E402
-from src.feature_study.worker import run_unit  # noqa: E402
+from src.feature_study.core.analysis import load_arms, run_aggregate  # noqa: E402
+from src.feature_study.core.arms import DEFAULT_ARM_SETS  # noqa: E402
+from src.feature_study.core.config import MAIN_TAGS, MODEL_SEED, SEASONS, seed_tag  # noqa: E402
+from src.feature_study.core.prepare import prepare  # noqa: E402
+from src.feature_study.core.worker import run_unit  # noqa: E402
 
 
 def main() -> None:
@@ -32,7 +32,6 @@ def main() -> None:
 
     p = sub.add_parser("prepare")
     p.add_argument("--raw-dir", default="dataset/raw")
-    p.add_argument("--shp-dir", default="dataset/shp")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--arm-sets", default=",".join(DEFAULT_ARM_SETS))
 
@@ -59,7 +58,7 @@ def main() -> None:
     out = Path(args.out_dir)
 
     if args.stage == "prepare":
-        prepare(args.raw_dir, args.shp_dir, out,
+        prepare(args.raw_dir, out,
                 arm_sets=tuple(s for s in args.arm_sets.split(",") if s))
     elif args.stage == "fit":
         wanted = [n for n in args.arms.split(",") if n]
