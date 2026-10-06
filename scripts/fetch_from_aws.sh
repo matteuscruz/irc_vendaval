@@ -6,7 +6,7 @@
 #
 # Depois de copiado, o arquivo é enviado automaticamente pro volume Modal
 # 'irc-vendaval-dataset' na próxima vez que qualquer pipeline
-# (cluster_lazy/mlp/lstm/gan) rodar — desde que esteja listado em
+# (cluster_lazy/mlp/lstm) rodar — desde que esteja listado em
 # DATASET_SENTINELS (src/modal/cluster_*.py) e ainda não exista no volume.
 # Funciona com qualquer conta Modal ativa (`modal profile current`), já que
 # o upload é condicional à presença do arquivo no volume, não à conta.
@@ -82,6 +82,6 @@ echo ""
 echo "OK — ${DEST_PATH} (${SIZE})$([ -n "$REMOTE_SIZE" ] && echo ", tamanho conferido com o remoto")"
 echo ""
 echo "Esse arquivo será enviado automaticamente pro volume Modal 'irc-vendaval-dataset'"
-echo "na próxima vez que você rodar qualquer pipeline (cluster_lazy/mlp/lstm/gan),"
+echo "na próxima vez que você rodar qualquer pipeline (cluster_lazy/mlp/lstm),"
 echo "desde que ainda não exista lá — funciona com qualquer conta Modal ativa."
 echo "(Se quiser forçar o re-upload do dataset inteiro nessa próxima run, use --force-dataset-upload.)"

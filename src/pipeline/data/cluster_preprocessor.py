@@ -1,17 +1,23 @@
+"""Construção dos dados da LSTM por cluster — fonte DIÁRIA.
+
+`ClusterDataBatch` é o contrato comum entre as fontes (diária aqui, horária em
+`hourly_builder.py`), o trainer e as métricas: janelas por
+split × estação do ano, alvo = rajada máxima diária em m/s escalonada por
+`scaler_y` (sem razão × ERA5), cluster como one-hot no último passo da janela.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 
-from src.data.climatology import get_climatology
+from src.data.climatology import get_harmonic_climatology
 from src.data.cluster_assigner import assign_station_clusters
 from src.data.netcdf_loader import NetCDFLoader
-from src.data.static_features import StationStaticFeatures
-
+from src.pipeline.data.splits import MonthBlockSplit, split_from_config
+from src.pipeline.data.windowing import build_daily_windows
 
 SEASONS: dict[str, list[int]] = {
     "DJF": [12, 1, 2],
@@ -19,335 +25,247 @@ SEASONS: dict[str, list[int]] = {
     "JJA": [6, 7, 8],
     "SON": [9, 10, 11],
 }
+_MONTH_TO_SEASON = {m: s for s, months in SEASONS.items() for m in months}
+SPLITS = ("train", "val", "test")
+META_KEYS = ("estacao", "latitude", "longitude", "time", "cluster_id")
 
-from src.pipelines.common import (
-    ERA5_GUST_PROXY, TEST_SLICE, TRAIN_SLICE, VAL_SLICE, build_flat_dataframe,
-    resolve_feature_groups, restrict_to_feature_coverage,
+from src.pipelines.common import (  # noqa: E402
+    ERA5_GUST_PROXY, TARGET_VAR, build_flat_dataframe,
+    assert_no_missing, resolve_feature_groups, select_complete_rows,
 )
 
 
 @dataclass
 class ClusterDataBatch:
-    # {season: (N, lookback, n_features)}
+    # {season: (N, T, F)} — T = dias (diário) ou 24 h (horário); o último
+    # passo é sempre o dia-alvo.
     x_train: dict[str, np.ndarray] = field(default_factory=dict)
     x_val: dict[str, np.ndarray] = field(default_factory=dict)
     x_test: dict[str, np.ndarray] = field(default_factory=dict)
-    # {season: (N, n_static)} — features estáticas por amostra (TRWindBC-style)
-    x_static_train: dict[str, np.ndarray] = field(default_factory=dict)
-    x_static_val: dict[str, np.ndarray] = field(default_factory=dict)
-    x_static_test: dict[str, np.ndarray] = field(default_factory=dict)
-    # {season: (N, 1)} — razao INMET/ERA5 escalonada
+    # {season: (N, 1)} — rajada máxima diária (m/s) escalonada por scaler_y
     y_train: dict[str, np.ndarray] = field(default_factory=dict)
     y_val: dict[str, np.ndarray] = field(default_factory=dict)
     y_test: dict[str, np.ndarray] = field(default_factory=dict)
-    # {season: (N,)} — valores brutos de ERA5 (wind_mag_max), ancora de
-    # reconstrucao (y_pred = ratio_pred * era5)
-    era5_train: dict[str, np.ndarray] = field(default_factory=dict)
-    era5_val: dict[str, np.ndarray] = field(default_factory=dict)
-    era5_test: dict[str, np.ndarray] = field(default_factory=dict)
-    # {season: {"estacao"/"latitude"/"longitude"/"time": (N,)}} — identidade
-    # de cada janela, alinhada posicionalmente com x_*/y_*/era5_* do mesmo
-    # split/season. Permite reconstruir predictions_by_station.csv (mesma
-    # granularidade que cluster_mlp.py já produz) em vez de só o agregado
-    # por cluster_id.
+    # {season: {"estacao"/"latitude"/"longitude"/"time"/"cluster_id": (N,)}} —
+    # identidade de cada janela, alinhada posicionalmente com x_*/y_*.
     meta_train: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
     meta_val: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
     meta_test: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
     scaler_x: RobustScaler = field(default_factory=RobustScaler)
     scaler_y: RobustScaler = field(default_factory=RobustScaler)
-    imputer_x: SimpleImputer = field(
-        default_factory=lambda: SimpleImputer(strategy="mean", keep_empty_features=True)
-    )
     feature_names: list[str] = field(default_factory=list)
-    static_feature_names: list[str] = field(default_factory=list)
     cluster_ids: list[int] = field(default_factory=list)
     station_clusters_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # Como o batch foi construído — vai para run_meta.json e dl_metadata.joblib
+    resolution: str = "daily"
+    window_length: int = 7
+    split: MonthBlockSplit = field(default_factory=MonthBlockSplit)
+    interp_method: str = "nearest"
+    climatology: dict = field(default_factory=lambda: {"method": "harmonic", "n_harmonics": 3})
+    hourly: dict | None = None
+
+
+class WindowBuckets:
+    """Acumula janelas por split × estação do ano e preenche o batch no fim
+    (uma concatenação por bucket em vez de append janela a janela)."""
+
+    def __init__(self) -> None:
+        self._d = {
+            sp: {s: {k: [] for k in ("x", "y", *META_KEYS)} for s in SEASONS}
+            for sp in SPLITS
+        }
+
+    def add(self, split, x, y, times, *, estacao, latitude, longitude, cluster_id) -> None:
+        times = pd.DatetimeIndex(times)
+        seasons = np.asarray(pd.Series(times.month).map(_MONTH_TO_SEASON))
+        for s in SEASONS:
+            m = seasons == s
+            n = int(m.sum())
+            if not n:
+                continue
+            b = self._d[split][s]
+            b["x"].append(np.asarray(x[m], dtype="float32"))
+            b["y"].append(np.asarray(y[m], dtype="float32").reshape(-1, 1))
+            b["time"].append(np.asarray(times[m].values))
+            b["estacao"].append(np.full(n, estacao, dtype=object))
+            b["latitude"].append(np.full(n, latitude, dtype=float))
+            b["longitude"].append(np.full(n, longitude, dtype=float))
+            b["cluster_id"].append(np.full(n, cluster_id))
+
+    def fill(self, batch: ClusterDataBatch, n_steps: int, n_features: int) -> ClusterDataBatch:
+        def cat(parts, empty):
+            return np.concatenate(parts, axis=0) if parts else empty
+
+        for sp in SPLITS:
+            xs, ys, metas = {}, {}, {}
+            for s in SEASONS:
+                b = self._d[sp][s]
+                xs[s] = cat(b["x"], np.zeros((0, n_steps, n_features), dtype="float32"))
+                ys[s] = cat(b["y"], np.zeros((0, 1), dtype="float32"))
+                metas[s] = {k: cat(b[k], np.array([])) for k in META_KEYS}
+            setattr(batch, f"x_{sp}", xs)
+            setattr(batch, f"y_{sp}", ys)
+            setattr(batch, f"meta_{sp}", metas)
+        return batch
+
+
+def station_coords(ds_inmet) -> pd.DataFrame:
+    """lat/lon por estação (índice = estacao) — mesmo recorte de
+    assign_station_clusters, funciona com lat/lon por estação ou por tempo."""
+    return (
+        ds_inmet[["latitude", "longitude"]].to_dataframe()
+        .groupby("estacao")[["latitude", "longitude"]].first()
+    )
+
+
+def cluster_onehot(cluster_ids: list, cluster_id) -> np.ndarray:
+    return (np.asarray(cluster_ids) == cluster_id).astype("float32")
 
 
 class ClusterPreprocessor:
-    """
-    Orquestra o pre-processamento para o pipeline de clusters:
-      1. Carrega INMET + ERA5 (NetCDF)
-      2. Atribui clusters via spatial join
-      3. Split espacial (80/20 estacoes treino/teste)
-      4. Calcula climatologia so no periodo de treino
-      5. Features + anomalias + one-hot de cluster
-      6. RobustScaler ajustado so no treino
-      7. Janelas deslizantes
-      8. Segregacao por estacao climatica (DJF/MAM/JJA/SON)
+    """Fonte diária da LSTM:
+
+      1. `load_extended(interp_method)` — INMET + ERA5-Basin (+ new_features)
+      2. clusters por spatial join
+      3. split por blocos de mês (`split_from_config`)
+      4. climatologia ERA5 harmônica ajustada só nos dias de treino
+      5. `build_flat_dataframe(require_target=False)` → calendário diário
+         contínuo por estação (dias ausentes viram rótulo "out")
+      6. linhas completas (`select_complete_rows`: clusters 100% cobertos
+         pelas features novas, sem NaN) — dia descartado vira "out" e purga
+         as janelas que o tocam
+      7. scaler_x/scaler_y ajustados em linhas de treino com alvo
+      8. janelas [i-L+1 .. i] com purga (`build_daily_windows(labels=...)`)
     """
 
     def __init__(
         self,
         raw_dir: str,
         shp_dir: str,
-        target_var: str = "daily_wind_gust_max",
-        train_slice: tuple[str, str] = TRAIN_SLICE,
-        val_slice: tuple[str, str] = VAL_SLICE,
-        test_slice: tuple[str, str] = TEST_SLICE,
-        test_station_fraction: float = 0.2,
+        *,
+        target_var: str = TARGET_VAR,
         lookback: int = 7,
+        split_cfg: dict | None = None,
         seed: int = 42,
         feature_groups: str | None = None,
-        restrict_coverage: bool = False,
+        interp_method: str = "nearest",
+        n_harmonics: int = 3,
     ) -> None:
         self.raw_dir = raw_dir
         self.shp_dir = shp_dir
         self.target_var = target_var
-        self.train_slice = slice(*train_slice)
-        self.val_slice = slice(*val_slice)
-        self.test_slice = slice(*test_slice)
-        self.test_station_fraction = test_station_fraction
-        self.lookback = lookback
+        self.lookback = int(lookback)
+        self.split_cfg = split_cfg
         self.seed = seed
         self.feature_groups = feature_groups
-        self.restrict_coverage = restrict_coverage
-
-    # ------------------------------------------------------------------
-    # API publica
-    # ------------------------------------------------------------------
+        self.interp_method = interp_method
+        self.n_harmonics = n_harmonics
 
     def run(self) -> ClusterDataBatch:
-        print("[preprocessor] Carregando datasets NetCDF...")
-        ds_inmet, ds_era5 = NetCDFLoader(self.raw_dir).load_extended()
+        print(f"[preprocessor] Carregando NetCDF (interp={self.interp_method})...")
+        ds_inmet, ds_era5 = NetCDFLoader(self.raw_dir).load_extended(
+            interp_method=self.interp_method,
+        )
 
         print("[preprocessor] Atribuindo clusters...")
         station_clusters = assign_station_clusters(ds_inmet, self.shp_dir)
-        cluster_ids = sorted(station_clusters["cluster_id"].unique().tolist())
+        cluster_of = station_clusters.set_index("estacao")["cluster_id"]
+        coords = station_coords(ds_inmet)
 
-        cluster_cols = [f"cluster_{c}" for c in cluster_ids]
-        # feature_names será definido após construir o DataFrame (só features disponíveis)
+        times = pd.DatetimeIndex(ds_era5["time"].values)
+        split = split_from_config(times, self.split_cfg, self.seed)
+        print(
+            f"[preprocessor] Split por blocos de mês: teste={list(split.test_months)}, "
+            f"{len(split.val_units)} blocos (ano, mês) de validação."
+        )
 
-        print("[preprocessor] Split apenas temporal — todas as estacoes em train/val/test...")
-        # Alinhado com cluster_lazy.py/cluster_mlp.py: mesmas estações em
-        # treino/val/teste, diferenciadas só pelo corte de tempo (TRAIN_SLICE/
-        # VAL_SLICE/TEST_SLICE) — não por holdout espacial de estações nunca
-        # vistas no treino. Isso sacrifica a validação de generalização
-        # espacial em troca de fidelidade estrita de comparação entre as 3
-        # pipelines no braço "original". test_station_fraction (parâmetro do
-        # construtor, YAML, spatial_correction_dl.py) fica mantido por
-        # compatibilidade de assinatura, mas não é mais usado aqui.
-        all_stations = ds_inmet.estacao.values
-        train_stations = all_stations
-        test_stations = all_stations
-
-        # Climatologia ERA5 necessária para a feature era5_clim_wind (entrada,
-        # não mais o alvo — ver _build_dataframe: alvo agora é razão INMET/ERA5,
-        # igual cluster_mlp.py/cluster_lazy.py, não anomalia vs. climatologia).
-        print("[preprocessor] Calculando climatologia ERA5 (treino)...")
-        ds_clim_era5 = get_climatology(ds_era5, ERA5_GUST_PROXY, self.train_slice)
+        print(f"[preprocessor] Climatologia ERA5 harmônica (n={self.n_harmonics}, dias de treino)...")
+        clim = get_harmonic_climatology(
+            ds_era5, ERA5_GUST_PROXY, times[split.label(times) == "train"], self.n_harmonics,
+        ).reset_coords(drop=True)
 
         print("[preprocessor] Construindo DataFrame de features...")
-        df = self._build_dataframe(
-            ds_inmet, ds_era5, station_clusters, ds_clim_era5, cluster_ids
+        df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, clim, require_target=False)
+        avail = resolve_feature_groups(self.feature_groups, df.columns)
+        df = select_complete_rows(df, avail, label="preprocessor")
+        cluster_ids = sorted(df["cluster_id"].unique().tolist())
+
+        stations = self._calendarize(df, split, avail)
+
+        fit = pd.concat(
+            [g.loc[(g["_label"] == "train") & g[self.target_var].notna(), avail + [self.target_var]]
+             for _, g in stations],
+            axis=0,
         )
-        if self.restrict_coverage:
-            df = restrict_to_feature_coverage(df, self.feature_groups)
+        if fit.empty:
+            raise ValueError("nenhuma linha de treino com alvo — confira split/date_range e os dados")
+        print(f"[preprocessor] Ajustando scalers em {len(fit)} linhas de treino...")
+        assert_no_missing(fit[avail], "features de treino")
+        scaler_x = RobustScaler().fit(fit[avail])
+        scaler_y = RobustScaler().fit(fit[[self.target_var]])
+        del fit
 
-        df_tr = df[df["estacao"].isin(train_stations)]
-        df_te = df[df["estacao"].isin(test_stations)]
+        feature_names = avail + [f"cluster_{c}" for c in cluster_ids]
+        print(f"[preprocessor] Janelas diárias (L={self.lookback}, {len(feature_names)} features)...")
+        buckets = WindowBuckets()
+        for est, g in stations:
+            cid = cluster_of.get(est, -1)
+            # Dias sem linha completa ficam NaN aqui, mas são rótulo "out" e a
+            # purga descarta toda janela que os toque.
+            base = scaler_x.transform(g[avail]).astype("float32")
+            onehot = np.broadcast_to(cluster_onehot(cluster_ids, cid), (len(g), len(cluster_ids)))
+            mat = np.hstack([base, onehot])
+            labels = g["_label"].to_numpy()
 
-        print("[preprocessor] Ajustando scalers no treino...")
-        df_train = df_tr[
-            (df_tr["time"] >= self.train_slice.start)
-            & (df_tr["time"] <= self.train_slice.stop)
-        ]
-        # Filtra apenas features disponíveis (ERA5-18UTC/BT55 podem estar ausentes)
-        _candidate_features = resolve_feature_groups(self.feature_groups)
-        avail_features = [f for f in _candidate_features if f in df.columns and df[f].notna().any()]
-        missing_feats = [f for f in _candidate_features if f not in df.columns]
-        if missing_feats:
-            print(
-                f"[preprocessor] AVISO: {len(missing_feats)} features ausentes "
-                f"(p.ex. _18z/bt55): {missing_feats[:5]}{'...' if len(missing_feats) > 5 else ''}"
-            )
-        feature_names = avail_features + cluster_cols
+            windows, tpos, keep = build_daily_windows(mat, g.index, self.lookback, labels=labels)
+            y = g[self.target_var].to_numpy(dtype=float)[tpos]
+            keep &= np.isfinite(y) & np.isfinite(windows).all(axis=(1, 2))
+            y_scaled = scaler_y.transform(y.reshape(-1, 1)).ravel() if len(y) else y
+            target_labels = labels[tpos]
+            lat, lon = coords.loc[est, "latitude"], coords.loc[est, "longitude"]
+            for sp in SPLITS:
+                idx = np.flatnonzero(keep & (target_labels == sp))
+                if len(idx):
+                    buckets.add(
+                        sp, windows[idx], y_scaled[idx], g.index[tpos[idx]],
+                        estacao=est, latitude=lat, longitude=lon, cluster_id=cid,
+                    )
 
-        # Imputação (média, fit só no treino) ANTES do scaler — sem isso,
-        # qualquer estação sem cobertura de era5_18z/bt55 (só 47/271 e
-        # 58/271 respectivamente) fica com NaN nessas features e
-        # _make_windows() descarta a janela inteira (ver comentário lá).
-        # Mesma técnica de preprocess_df() em common.py, usada por
-        # lazy/MLP — sem isso o LSTM ficava restrito a ~45/271 estações
-        # (só as com cobertura simultânea de era5_18z E bt55), bem menos
-        # que as outras duas pipelines (~235/271).
-        imputer_x = SimpleImputer(strategy="mean", keep_empty_features=True)
-        imputer_x.fit(df_train[avail_features])
-
-        scaler_x = RobustScaler()
-        scaler_y = RobustScaler()
-        scaler_x.fit(imputer_x.transform(df_train[avail_features]))
-        scaler_y.fit(df_train[["ratio"]])
-
-        print("[preprocessor] Computando features estaticas por estacao...")
-        static_builder = StationStaticFeatures()
-        df_static = static_builder.compute(
-            ds_inmet, self.target_var, self.train_slice, train_stations
-        )
-
-        print("[preprocessor] Gerando janelas por estacao climatica...")
         batch = ClusterDataBatch(
             scaler_x=scaler_x,
             scaler_y=scaler_y,
-            imputer_x=imputer_x,
             feature_names=feature_names,
-            static_feature_names=StationStaticFeatures.FEATURE_NAMES,
             cluster_ids=cluster_ids,
             station_clusters_df=station_clusters,
+            resolution="daily",
+            window_length=self.lookback,
+            split=split,
+            interp_method=self.interp_method,
+            climatology={"method": "harmonic", "n_harmonics": self.n_harmonics},
+            hourly=None,
         )
-
-        splits = {
-            "train": (df_tr, self.train_slice),
-            "val": (df_tr, self.val_slice),
-            "test": (df_te, self.test_slice),
-        }
-
-        for split_name, (df_split, time_sl) in splits.items():
-            mask = (df_split["time"] >= time_sl.start) & (
-                df_split["time"] <= time_sl.stop
-            )
-            df_period = df_split[mask].copy()
-            x_s, xs_s, y_s, era5_s, meta_s = self._make_windows(
-                df_period, avail_features, cluster_cols, imputer_x, scaler_x,
-                scaler_y, df_static,
-            )
-            setattr(batch, f"x_{split_name}", x_s)
-            setattr(batch, f"x_static_{split_name}", xs_s)
-            setattr(batch, f"y_{split_name}", y_s)
-            setattr(batch, f"era5_{split_name}", era5_s)
-            setattr(batch, f"meta_{split_name}", meta_s)
-
+        buckets.fill(batch, self.lookback, len(feature_names))
+        for sp in SPLITS:
+            n = sum(len(v) for v in getattr(batch, f"x_{sp}").values())
+            print(f"[preprocessor]   {sp}: {n} janelas")
         return batch
 
-    # ------------------------------------------------------------------
-    # Helpers internos
-    # ------------------------------------------------------------------
-
-    def _build_dataframe(
-        self,
-        ds_inmet,
-        ds_era5,
-        station_clusters,
-        ds_clim_era5,
-        cluster_ids,
-    ):
-        """Constroi DataFrame flat com features, razao ERA5 e cluster.
-
-        Delega ao build_flat_dataframe canonical de common.py (que adiciona
-        month_sin/cos, era5_clim_wind via ds_clim_era5, lags autoregressivos
-        INMET, etc.) e depois acrescenta o alvo (razao INMET/ERA5) e one-hot
-        de cluster.
-        """
-        # build_flat_dataframe requer climatologia ERA5 para era5_clim_wind
-        df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim_era5)
-
-        # Alvo = razao INMET/ERA5 (igual cluster_mlp.py/cluster_lazy.py) em vez
-        # de anomalia vs. climatologia INMET — ancorado no ERA5 (que ja
-        # correlaciona fortemente com a verdade), muito mais facil de aprender
-        # que a variancia residual pura da anomalia climatologica.
-        era5_safe = df[ERA5_GUST_PROXY].clip(lower=0.1)
-        df["ratio"] = df[self.target_var] / era5_safe
-        df = df.dropna(subset=["ratio", ERA5_GUST_PROXY])
-
-        # One-hot de cluster (cluster_id já está no df via build_flat_dataframe)
-        for c in cluster_ids:
-            df[f"cluster_{c}"] = (df["cluster_id"] == c).astype(float)
-
-        month_to_season: dict[int, str] = {}
-        for s, months in SEASONS.items():
-            for m in months:
-                month_to_season[m] = s
-        df["season"] = df["time"].dt.month.map(month_to_season)
-
-        return df.sort_values(["estacao", "time"]).reset_index(drop=True)
-
-    def _make_windows(
-        self,
-        df: pd.DataFrame,
-        base_features: list[str],
-        cluster_cols: list[str],
-        imputer_x: SimpleImputer,
-        scaler_x: RobustScaler,
-        scaler_y: RobustScaler,
-        df_static: pd.DataFrame,
-    ) -> tuple[dict, dict, dict, dict, dict]:
-        """Janelas deslizantes segregadas por estacao climatica.
-
-        Retorna (x_dynamic, x_static, y, era5, meta) — cada um mapeado por
-        season. x_static[season] tem shape (N, n_static): o vetor estático
-        da estação é replicado para cada janela gerada por aquela estação.
-        era5[season] guarda o valor bruto de wind_mag_max por janela — ancora
-        usada pra reconstruir a predição absoluta (y_pred = ratio_pred *
-        era5), igual ao padrão de cluster_mlp.py. meta[season] é um dict com
-        "estacao"/"latitude"/"longitude"/"time" por janela — permite ao
-        pipeline salvar predictions_by_station.csv com granularidade real de
-        estação, em vez de só o agregado por cluster_id.
-        """
-        x_seas: dict[str, list] = {s: [] for s in SEASONS}
-        xs_seas: dict[str, list] = {s: [] for s in SEASONS}
-        y_seas: dict[str, list] = {s: [] for s in SEASONS}
-        era5_seas: dict[str, list] = {s: [] for s in SEASONS}
-        station_seas: dict[str, list] = {s: [] for s in SEASONS}
-        lat_seas: dict[str, list] = {s: [] for s in SEASONS}
-        lon_seas: dict[str, list] = {s: [] for s in SEASONS}
-        time_seas: dict[str, list] = {s: [] for s in SEASONS}
-
-        static_lookup = df_static.set_index("estacao")
-
-        for station, df_st in df.groupby("estacao"):
-            df_st = df_st.sort_values("time")
-            if len(df_st) < self.lookback:
-                continue
-
-            # Imputar (media do treino) antes de escalonar — evita descartar
-            # a estacao inteira so por faltar era5_18z/bt55 (ver run()).
-            # Cluster cols sao binarias (sem escala/imputacao).
-            x_base = scaler_x.transform(imputer_x.transform(df_st[base_features]))
-            x_cluster = df_st[cluster_cols].values
-            x_all = np.hstack([x_base, x_cluster])
-
-            y_scaled = scaler_y.transform(df_st[["ratio"]])
-            era5_vals = df_st[ERA5_GUST_PROXY].values
-            seasons = df_st["season"].values
-            lat_val = df_st["latitude"].values
-            lon_val = df_st["longitude"].values
-            time_val = df_st["time"].values
-
-            static_vec = static_lookup.loc[station].values.astype("float32")
-
-            for i in range(self.lookback, len(df_st)):
-                window = x_all[i - self.lookback: i]
-                if not np.isfinite(window).all() or not np.isfinite(y_scaled[i]).all():
-                    # janela contaminada por NaN (ex.: estacao fora da cobertura
-                    # ERA5-18Z/BT55) — pular em vez de deixar o NaN se propagar
-                    # silenciosamente pros pesos compartilhados da LSTM.
-                    continue
-                s = seasons[i]
-                x_seas[s].append(window)
-                xs_seas[s].append(static_vec)
-                y_seas[s].append(y_scaled[i])
-                era5_seas[s].append(era5_vals[i])
-                station_seas[s].append(station)
-                lat_seas[s].append(lat_val[i])
-                lon_seas[s].append(lon_val[i])
-                time_seas[s].append(time_val[i])
-
-        # season-first (igual x_seas/y_seas/era5_seas) — meta[season]["estacao"],
-        # não meta["estacao"][season].
-        meta = {
-            s: {
-                "estacao": np.array(station_seas[s]),
-                "latitude": np.array(lat_seas[s]),
-                "longitude": np.array(lon_seas[s]),
-                "time": np.array(time_seas[s]),
-            }
-            for s in SEASONS
-        }
-
-        return (
-            {s: np.array(v) for s, v in x_seas.items()},
-            {s: np.array(v) for s, v in xs_seas.items()},
-            {s: np.array(v) for s, v in y_seas.items()},
-            {s: np.array(v) for s, v in era5_seas.items()},
-            meta,
-        )
+    def _calendarize(
+        self, df: pd.DataFrame, split: MonthBlockSplit, avail: list[str],
+    ) -> list[tuple[str, pd.DataFrame]]:
+        """Por estação: calendário diário contínuo (índice = time), rótulo de
+        split em `_label` (dia sem linha no merge → "out", purgado junto com
+        toda janela que o toque)."""
+        keep_cols = list(dict.fromkeys([self.target_var, *avail]))
+        out = []
+        for est, g in df.groupby("estacao", sort=True):
+            g = g.set_index("time").sort_index()
+            g = g[~g.index.duplicated(keep="first")][keep_cols]
+            cal = pd.date_range(g.index[0], g.index[-1], freq="D", name="time")
+            present = cal.isin(g.index)
+            g = g.reindex(cal)
+            labels = split.label(cal)
+            labels[~present] = "out"
+            g["_label"] = labels
+            out.append((est, g))
+        return out

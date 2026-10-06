@@ -15,7 +15,7 @@ from typing import Iterator
 
 import pandas as pd
 
-from src.pipelines.common import TRAIN_SLICE, TEST_SLICE, ERA5_GUST_PROXY, make_split
+from src.pipelines.common import ERA5_GUST_PROXY, split_part
 from src.pipeline.validation.spatial_folds import build_station_folds, FOLD_COL
 from src.pipeline.validation.climatology_population import (
     compute_population_climatology,
@@ -36,25 +36,29 @@ def iter_holdout_folds(
     mode: str,
     n_folds: int = 5,
     seed: int = 42,
-    train_slice: tuple = TRAIN_SLICE,
-    eval_slice: tuple = TEST_SLICE,
+    train_label: str = "train",
+    eval_label: str = "test",
     clim_value_col: str = ERA5_GUST_PROXY,
 ) -> Iterator[HoldoutFold]:
     """Itera folds de station-holdout sobre `df_cluster`.
 
-    Para cada fold: `df_train` contém as estações NÃO held-out, restritas a
-    `train_slice`, com `era5_clim_wind` recalculada como climatologia
-    populacional (cluster-mean) sobre essas mesmas estações de treino.
-    `df_eval` contém só as estações held-out, restritas a `eval_slice`, com a
-    mesma climatologia populacional aplicada (mapeada por dia-do-ano — a
-    climatologia independe do ano específico).
+    Para cada fold: `df_train` contém as estações NÃO held-out, restritas às
+    linhas de treino do split por blocos de mês, com `era5_clim_wind`
+    recalculada como climatologia populacional (cluster-mean) sobre essas
+    mesmas estações de treino. `df_eval` contém só as estações held-out,
+    restritas às linhas de teste, com a mesma climatologia populacional
+    aplicada (mapeada por dia-do-ano — a climatologia independe do ano).
 
-    `clim_value_col` deve ser a MESMA coluna usada por `get_climatology(...)`
-    na construção original de `era5_clim_wind` (ver `src/pipelines/common.py`
-    ::build_flat_dataframe`) — `ERA5_GUST_PROXY` (wind_mag_max) no
-    `cluster_mlp`, `TARGET_VAR` (daily_wind_gust_max) no `cluster_lazy`.
-    Um valor incorreto recalcularia a climatologia populacional a partir da
-    coluna errada, sem levantar erro (silenciosamente incoerente).
+    O recorte temporal vem da coluna de rótulos (`SPLIT_COL`) escrita pelo
+    loader da pipeline, e não de um intervalo de datas: os blocos de validação
+    são sorteados uma única vez sobre todos os anos, então recalcular a
+    partição por fold devolveria um recorte diferente do usado no treino.
+
+    `clim_value_col` deve ser a MESMA coluna usada na construção original de
+    `era5_clim_wind` (ver `src/pipelines/common.py::build_flat_dataframe`) —
+    `ERA5_GUST_PROXY` (`wind_mag_max`) em lazy e mlp. Um valor incorreto
+    recalcularia a climatologia populacional a partir da coluna errada, sem
+    levantar erro (silenciosamente incoerente).
     """
     folds = build_station_folds(df_cluster, mode=mode, n_folds=n_folds, seed=seed)
     fold_ids = sorted(folds[FOLD_COL].unique())
@@ -65,11 +69,11 @@ def iter_holdout_folds(
         if not train_stations or not held_out_stations:
             continue
 
-        df_train_raw = make_split(
-            df_cluster[df_cluster["estacao"].isin(train_stations)], train_slice
+        df_train_raw = split_part(
+            df_cluster[df_cluster["estacao"].isin(train_stations)], train_label
         )
-        df_eval_raw = make_split(
-            df_cluster[df_cluster["estacao"].isin(held_out_stations)], eval_slice
+        df_eval_raw = split_part(
+            df_cluster[df_cluster["estacao"].isin(held_out_stations)], eval_label
         )
         if df_train_raw.empty or df_eval_raw.empty:
             continue

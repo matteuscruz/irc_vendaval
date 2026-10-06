@@ -12,8 +12,8 @@ e detalhes de implementação.
 - [Pipeline `cluster_lstm`](04_cluster_lstm.md)
 - [Pipeline `cluster_mlp`](05_cluster_mlp.md)
 - [Pipeline `cluster_lazy`](06_cluster_lazy.md)
-- [Pipeline `cluster_gan`](07_cluster_gan.md)
 - [Inferência e artefatos](08_inferencia_e_artefatos.md)
+- [Estudo de informação de features](09_estudo_de_features.md)
 
 ## Como usar esta pasta
 

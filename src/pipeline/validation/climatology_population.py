@@ -17,8 +17,10 @@ populacionalmente (nunca com a própria estação-alvo).
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
+from src.data.climatology import _harmonic_design
 from src.pipelines.common import ERA5_GUST_PROXY
 
 CLIM_COL = "era5_clim_wind"
@@ -27,14 +29,46 @@ CLIM_COL = "era5_clim_wind"
 def compute_population_climatology(
     df_train_fold: pd.DataFrame,
     value_col: str = ERA5_GUST_PROXY,
+    n_harmonics: int = 3,
 ) -> pd.Series:
-    """Média por dia-do-ano de `value_col`, agregada sobre TODAS as estações
-    presentes em `df_train_fold` (cluster-mean). `df_train_fold` já deve estar
-    restrito ao período de treino e às estações do fold de treino (held-out
-    excluída). Retorna Series indexada por `dayofyear`."""
+    """Climatologia populacional (cluster-mean) de `value_col`, indexada por
+    `dayofyear` (1..366). `df_train_fold` já deve estar restrito ao período de
+    treino e às estações do fold de treino (held-out excluída).
+
+    O ajuste é por **série harmônica**, não por média direta do dia-do-ano,
+    pelo mesmo motivo de `src/data/climatology.py::get_harmonic_climatology`:
+    sob o split por blocos de mês, os meses de teste (Jan/Abr/Jul/Out) não têm
+    NENHUMA amostra de treino, então a média por dia-do-ano ficaria indefinida
+    em ~120 dos 126 dias-do-ano avaliados e `apply_population_climatology`
+    descartaria quase todo o conjunto de avaliação do fold. A série harmônica é
+    contínua no ano e fica definida nos 366 dias.
+    """
     if "dayofyear" not in df_train_fold.columns:
         raise ValueError("df_train_fold precisa da coluna 'dayofyear'")
-    return df_train_fold.groupby("dayofyear")[value_col].mean()
+
+    obs = df_train_fold.groupby("dayofyear")[value_col].mean().dropna()
+    doy_grid = np.arange(1, 367)
+    if obs.empty:
+        return pd.Series(np.nan, index=pd.Index(doy_grid, name="dayofyear"))
+
+    # Ajusta quantos harmônicos a amostra suportar (cada um custa 2
+    # coeficientes, mais o intercepto). Com poucos dias distintos o ajuste
+    # degenera para a média constante do fold — que continua DEFINIDA nos 366
+    # dias, que é a propriedade da qual o fold depende. Cair na média por
+    # dia-do-ano aqui reintroduziria os buracos que motivaram a harmônica.
+    n_harmonics = min(n_harmonics, max(0, (len(obs) - 1) // 2))
+    if n_harmonics == 0:
+        return pd.Series(
+            float(obs.mean()), index=pd.Index(doy_grid, name="dayofyear"), name=value_col,
+        )
+
+    design = _harmonic_design(obs.index.to_numpy(), n_harmonics)
+    coef, *_ = np.linalg.lstsq(design, obs.to_numpy(dtype=float), rcond=None)
+    return pd.Series(
+        _harmonic_design(doy_grid, n_harmonics) @ coef,
+        index=pd.Index(doy_grid, name="dayofyear"),
+        name=value_col,
+    )
 
 
 def apply_population_climatology(

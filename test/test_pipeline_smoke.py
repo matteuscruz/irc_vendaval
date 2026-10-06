@@ -1,5 +1,5 @@
 """Smoke tests de ponta a ponta para as 4 pipelines reais (cluster_lazy,
-cluster_mlp, cluster_lstm, cluster_gan): cada uma roda contra dados
+cluster_mlp, cluster_lstm): cada uma roda contra dados
 sintéticos minúsculos (test/conftest.py::synthetic_raw_dir) e a asserção é
 "rodou sem crashar E produziu artefato com o schema esperado" — não
 resultado estatístico (os dados são sintéticos demais pra isso fazer
@@ -59,128 +59,90 @@ def test_cluster_mlp_smoke(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp
     assert (results["pipeline"] == "mlp").all()
 
 
-def test_cluster_gan_smoke(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
-    from src.pipelines import cluster_gan
-
-    output_dir = tmp_path / "gan_clusters"
-    cluster_gan.run(
-        raw_dir=str(synthetic_raw_dir),
-        shp_dir=str(synthetic_shp_dir),
-        output_dir=str(output_dir),
-        exp_name="smoke",
-        epochs=3,
-        n_per_cluster=10,
-    )
-
-    csv_path = output_dir / "smoke" / "synthetic_augment.csv"
-    assert csv_path.exists(), f"synthetic_augment.csv não foi gerado em {csv_path}"
-    synthetic = pd.read_csv(csv_path)
-    assert not synthetic.empty
-    assert "daily_wind_gust_max" in synthetic.columns
-    assert "cluster_id" in synthetic.columns
 
 
-def _lstm_smoke_config(output_dir: Path, raw_dir: Path, shp_dir: Path, augmentation: dict) -> dict:
-    return {
-        "version": 1,
-        "experiment": {
-            "name": "smoke",
-            "seed": 42,
-            "output_dir": str(output_dir),
-        },
+def _lstm_smoke_config(
+    output_dir: Path, raw_dir: Path, shp_dir: Path,
+    resolution: str = "daily",
+) -> dict:
+    """Config LSTM v2 mínima — dados diários contínuos (synthetic_daily_raw_dir);
+    o fixture mensal zeraria as janelas depois da purga por bloco de mês."""
+    cfg = {
+        "version": 2,
+        "experiment": {"name": "smoke", "seed": 42, "output_dir": str(output_dir)},
         "data": {
             "raw_dir": str(raw_dir),
             "shp_dir": str(shp_dir),
             "target_var": "daily_wind_gust_max",
-            "train_slice": ["2008-01-01", "2018-12-31"],
-            "val_slice": ["2019-01-01", "2019-12-31"],
-            "test_slice": ["2020-01-01", "2025-12-31"],
-            "test_station_fraction": 0.2,
+            "resolution": resolution,
             "feature_groups": "original",
+            "interp_method": "nearest",
+            "split": {"scheme": "month_block", "test_months": [1, 4, 7, 10],
+                      "val_fraction": 0.25, "purge": "strict"},
+            "climatology": {"method": "harmonic", "n_harmonics": 3},
+            "hourly": {"file": "test_cluster_3_hourly.nc", "day_offset_hours": 0},
         },
         "preprocessing": {"lookback": 3},
         "model": {
-            "name": "cluster_dual_head_lstm",
-            "params": {"units": 8, "dropout": 0.1, "l2_reg": 0.01, "learning_rate": 0.01},
+            "name": "cluster_lstm",
+            "params": {"units": 8, "dropout": 0.1, "huber_delta": 1.0, "learning_rate": 0.01},
         },
-        "training": {"epochs": 2, "batch_size": 8, "patience": 1, "min_samples": 2},
-        "augmentation": augmentation,
+        "training": {"epochs": 2, "batch_size": 64, "patience": 1, "min_samples": 2},
         "visualization": {"enabled": False},
     }
+    if resolution == "hourly":
+        cfg["data"].pop("feature_groups")   # a fonte horária traz as próprias features (data.hourly)
+    return cfg
 
 
-def test_cluster_lstm_smoke(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
+def _assert_lstm_v2_artifacts(output_dir: Path, resolution: str, lookback: int) -> None:
+    from src.inference.dl_metadata import load_dl_metadata
+
+    results_path = output_dir / "smoke" / "_partial" / "csv" / "results.csv"
+    assert results_path.exists(), f"results.csv não foi gerado em {results_path}"
+    assert not pd.read_csv(results_path).empty
+
+    meta_paths = list(output_dir.rglob("dl_metadata.joblib"))
+    assert len(meta_paths) == 1
+    meta = load_dl_metadata(meta_paths[0].parent, require_resolution=resolution)
+    assert meta["lookback"] == lookback and meta["target_kind"] == "absolute"
+    assert list(meta_paths[0].parent.glob("best_model_c*.keras"))
+
+    preds = pd.read_csv(next(output_dir.rglob("predictions_by_station.csv")), parse_dates=["time"])
+    assert set(preds["time"].dt.month) <= {1, 4, 7, 10}
+    assert preds["y_pred"].between(0, 80).all()
+
+
+def test_cluster_lstm_smoke(synthetic_daily_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
     from src.pipelines import cluster_lstm
 
     output_dir = tmp_path / "lstm_experiments"
     config = _lstm_smoke_config(
-        output_dir, synthetic_raw_dir, synthetic_shp_dir, {"method": "none"}
+        output_dir, synthetic_daily_raw_dir, synthetic_shp_dir
     )
     config_path = tmp_path / "smoke_lstm.yaml"
     config_path.write_text(yaml.dump(config))
 
     cluster_lstm.run(config=str(config_path))
 
-    results_path = output_dir / "smoke" / "_partial" / "csv" / "results.csv"
-    assert results_path.exists(), f"results.csv não foi gerado em {results_path}"
-    results = pd.read_csv(results_path)
-    assert not results.empty
+    _assert_lstm_v2_artifacts(output_dir, "daily", 3)
 
 
-def test_cluster_lstm_smoke_extreme_gan(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
-    """Fase 1 do plano de melhorias do GAN: ExGANAugmenter (gera X+y juntos,
-    sem nearest-neighbor pós-hoc) acionado via augmentation.method do YAML,
-    caminho até agora nunca exercitado pelo ablation do LSTM."""
+def test_cluster_lstm_smoke_hourly(synthetic_hourly_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
     from src.pipelines import cluster_lstm
 
-    output_dir = tmp_path / "lstm_experiments_extreme_gan"
+    output_dir = tmp_path / "lstm_experiments_hourly"
     config = _lstm_smoke_config(
-        output_dir, synthetic_raw_dir, synthetic_shp_dir,
-        {
-            "method": "extreme_gan",
-            "extreme_percentile": 90.0,
-            "multiplier": 1.0,
-            "extreme_gan": {
-                "latent_dim": 4, "hidden_units": 8, "epochs": 1, "batch_size": 8,
-                "n_critic": 1, "k_shift": 1, "c_shift": 0.3,
-            },
-        },
+        output_dir, synthetic_hourly_raw_dir, synthetic_shp_dir,
+        resolution="hourly",
     )
-    config_path = tmp_path / "smoke_lstm_extreme_gan.yaml"
+    config_path = tmp_path / "smoke_lstm_hourly.yaml"
     config_path.write_text(yaml.dump(config))
 
     cluster_lstm.run(config=str(config_path))
 
-    results_path = output_dir / "smoke" / "_partial" / "csv" / "results.csv"
-    assert results_path.exists(), f"results.csv não foi gerado em {results_path}"
-    results = pd.read_csv(results_path)
-    assert not results.empty
+    _assert_lstm_v2_artifacts(output_dir, "hourly", 24)
 
 
-def test_cluster_lstm_smoke_extreme_diffusion(synthetic_raw_dir: Path, synthetic_shp_dir: Path, tmp_path: Path):
-    """Fase 1 do plano de melhorias do GAN: ExtremeDiffusionAugmenter (DDPM+CFG,
-    gera X+y juntos) acionado via augmentation.method do YAML."""
-    from src.pipelines import cluster_lstm
 
-    output_dir = tmp_path / "lstm_experiments_extreme_diffusion"
-    config = _lstm_smoke_config(
-        output_dir, synthetic_raw_dir, synthetic_shp_dir,
-        {
-            "method": "extreme_diffusion",
-            "extreme_percentile": 90.0,
-            "multiplier": 1.0,
-            "extreme_diffusion": {
-                "time_steps": 10, "sampling_steps": 3, "hidden_units": 8,
-                "time_emb_dim": 4, "epochs": 1, "batch_size": 8,
-            },
-        },
-    )
-    config_path = tmp_path / "smoke_lstm_extreme_diffusion.yaml"
-    config_path.write_text(yaml.dump(config))
 
-    cluster_lstm.run(config=str(config_path))
-
-    results_path = output_dir / "smoke" / "_partial" / "csv" / "results.csv"
-    assert results_path.exists(), f"results.csv não foi gerado em {results_path}"
-    results = pd.read_csv(results_path)
-    assert not results.empty

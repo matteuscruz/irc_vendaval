@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from src.pipelines.common import ERA5_GUST_PROXY, TRAIN_SLICE, month_to_season
+from src.pipelines.common import ERA5_GUST_PROXY, default_month_block_split, month_to_season
 from src.dataset.creation.best_model_selector import Combo, build_winner_table
 
 SEASONS_ORDER = ["DJF", "MAM", "JJA", "SON"]
@@ -334,8 +334,12 @@ def run(
     from scipy.ndimage import gaussian_filter
 
     start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
-    train_start, train_end = pd.Timestamp(TRAIN_SLICE[0]), pd.Timestamp(TRAIN_SLICE[1])
     years = range(start_ts.year, end_ts.year + 1)
+    # Partição resolvida sobre todo o período gerado, para o rótulo in_sample
+    # abaixo bater com a que treinou os modelos.
+    _split_labels = default_month_block_split(
+        pd.date_range(start_ts, end_ts, freq="D").values
+    )
     created: list[str] = []
 
     for year in years:
@@ -380,11 +384,12 @@ def run(
 
         era5_vals = era5_year.values.astype(np.float32)
         rajada_corrigida = np.clip(era5_vals + bias_grid, 0, None)
-        # Antes deste fix, in_sample = dates <= train_end (só o limite
-        # superior) — marcava 2000-2007 como in_sample=True mesmo quando
-        # TRAIN_SLICE começava em 2008, dando a entender que o modelo tinha
-        # visto dado que na verdade nunca esteve em nenhum split de treino.
-        in_sample = np.asarray((dates >= train_start) & (dates <= train_end))
+        # Sob o split por blocos de mês, "in sample" deixou de ser um
+        # intervalo de datas: os meses de teste (Jan/Abr/Jul/Out) estão
+        # intercalados em TODOS os anos. Marcar um intervalo contínuo
+        # rotularia esses meses como vistos pelo modelo, que é o oposto do
+        # que a flag informa. O rótulo vem da própria partição.
+        in_sample = np.asarray(_split_labels.label(dates) == "train")
 
         ds_out = xr.Dataset(
             {
@@ -411,7 +416,7 @@ def run(
         ds_out.attrs = {
             "source": "IRC Vendaval — corrected_grid (best-model-per-cluster-per-season)",
             "metric_used": metric,
-            "in_sample_period": f"{TRAIN_SLICE[0]}/{TRAIN_SLICE[1]}",
+            "in_sample_period": "month_block: meses de treino (exclui Jan/Abr/Jul/Out)",
             "n_stations_magnitude": int(len(mag_stations)),
             "n_stations_direction": int(len(dir_stations)),
             "idw_k": idw_neighbors,

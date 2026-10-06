@@ -5,7 +5,7 @@ Esta pipeline usa `MLPRegressor` do scikit-learn como baseline supervisionado po
 ## Características
 
 - alvo treinado como razão `INMET / ERA5`;
-- pré-processamento com imputação por média e `RobustScaler`;
+- pré-processamento só com `RobustScaler` (linhas com feature ausente são descartadas, sem imputação);
 - reamostragem dos extremos via `extreme_power`;
 - avaliação com métricas gerais e de cauda.
 
@@ -19,7 +19,7 @@ Esta pipeline usa `MLPRegressor` do scikit-learn como baseline supervisionado po
 
 ## Artefatos
 
-- `.joblib` por cluster com modelo + imputer + scaler + features.
+- `.joblib` por cluster com modelo + scaler + features.
 - CSVs de resultados por cluster e consolidados.
 - gráficos de dispersão, distribuição e importância por permutação.
 

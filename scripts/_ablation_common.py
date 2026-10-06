@@ -20,12 +20,9 @@ METRIC_DIRECTIONS = {
 }
 
 ABLATION_MATRIX = [
-    {"name": "original", "feature_groups": "original", "use_synthetic": False},
-    {"name": "synthetic", "feature_groups": "original", "use_synthetic": True},
-    {"name": "newfeatures", "feature_groups": "original,era5_18z,bt55", "use_synthetic": False},
-    {"name": "all", "feature_groups": "original,era5_18z,bt55", "use_synthetic": True},
-    {"name": "basin", "feature_groups": "original,era5_basin", "use_synthetic": False},
-    {"name": "all_basin", "feature_groups": "original,era5_18z,bt55,era5_basin", "use_synthetic": True},
+    {"name": "original", "feature_groups": "original"},
+    {"name": "newfeatures", "feature_groups": "original,new_features"},
+    {"name": "basin", "feature_groups": "original,era5_basin"},
 ]
 
 
@@ -43,11 +40,8 @@ def comparison_dirname(prefix: str) -> str:
 # Mesma família de paleta de scripts/compare_pipelines.py (evita vermelho).
 ARM_COLORS = {
     "original": "#2a78d6",     # blue
-    "synthetic": "#1baf7a",    # aqua
     "newfeatures": "#c98a1f",  # amber
-    "all": "#4a3aa7",          # violet
     "basin": "#3d8b3d",        # green
-    "all_basin": "#8a5a2e",    # brown
 }
 INK_PRIMARY = "#0b0b0b"
 INK_SECONDARY = "#52514e"

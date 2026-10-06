@@ -26,11 +26,10 @@ reduzir a mistura de regimes meteorológicos distintos.
 
 - cada região combina relevo, rugosidade e dinâmica atmosférica diferentes;
 - modelos globais tendem a misturar regimes pouco comparáveis;
-- clusters menores podem se beneficiar mais de augmentation e vizinhos.
+- clusters menores podem se beneficiar mais dos dados de clusters vizinhos.
 
 ## Uso na pipeline
 
 - `cluster_lstm` treina um modelo por cluster.
 - `cluster_mlp` também treina por cluster, mas com input tabular.
 - `cluster_lazy` avalia modelos por cluster e, opcionalmente, por trimestre.
-- `cluster_gan` gera sintéticos por cluster para alimentar o treino downstream.

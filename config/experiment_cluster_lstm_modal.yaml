@@ -1,68 +1,57 @@
-version: 1
+version: 2
+# LSTM por cluster, saída única em m/s:
+#   Input(T, F) → LSTM(96) → último estado → Dropout(0.3) → Dense(1), Huber + Adam.
+# Chaves da versão dual-head (train/val/test_slice, test_station_fraction,
+# l2_reg, weight_*, extreme_*) foram removidas e são REJEITADAS pelo loader
+# (src/pipeline/data/lstm_sources.py::validate_lstm_config).
 
 experiment:
-  name: cluster_lstm_v1
+  name: cluster_lstm_v2
   seed: 42
+  deterministic: false        # true = tf.config.experimental.enable_op_determinism (mais lento)
   output_dir: /artifacts/modal/experiments
 
 data:
   raw_dir: /dataset/raw
   shp_dir: /dataset/shp
   target_var: daily_wind_gust_max
-  train_slice: ["2008-01-01", "2018-12-31"]
-  val_slice:   ["2019-01-01", "2019-12-31"]
-  test_slice:  ["2020-01-01", "2025-12-31"]
-  test_station_fraction: 0.2
+  resolution: daily           # daily | hourly (hourly: só onde há arquivo horário — hoje cluster 3)
+  # feature_groups: ausente = original; "original,new_features" usa dataset/raw/new_features
+  #   (só clusters 100% cobertos). O ablation passa --feature-groups por braço.
+  interp_method: bilinear     # nearest | bilinear — grade ERA5→estação (só diário);
+                              # bilinear lê era5_merged_cache_bilinear.nc (--build-cache --interp-method bilinear)
+  split:
+    scheme: month_block
+    test_months: [1, 4, 7, 10]          # teste = Jan/Abr/Jul/Out de TODOS os anos
+    val_fraction: 0.15                  # blocos (ano, mês) sorteados nos meses de treino
+    val_stratify_by_month: true
+    date_range: null                    # [início, fim] opcional; fora = descartado
+    purge: strict                       # janela só entra se todos os dias têm o rótulo do alvo
+  climatology:
+    method: harmonic                    # ajustada só nos dias de treino
+    n_harmonics: 3
+  hourly:
+    file: test_cluster_3_hourly.nc
+    features: null                      # null = HOURLY_FEATURES (src/pipeline/data/hourly_builder.py)
+    daily_context_features: null        # null = sazonalidade (day/month sin/cos)
+    day_offset_hours: 0                 # 3 = dia local UTC-3
 
 preprocessing:
-  lookback: 7
+  lookback: 7                 # diário: janela [D-6 .. D]; horário é sempre as 24 h de D
 
 model:
-  name: cluster_dual_head_lstm
+  name: cluster_lstm
   params:
-    units: 64
-    dropout: 0.4
-    l2_reg: 0.01
+    units: 96
+    dropout: 0.3
+    huber_delta: 1.0
     learning_rate: 0.001
-    weight_normal: 0.7
-    weight_extreme: 0.3
-    extreme_weight: 20.0
-    extreme_threshold: 1.5
 
 training:
   epochs: 50
   batch_size: 64
   patience: 5
   min_samples: 10
-
-augmentation:
-  method: none               # extreme_gan | extreme_diffusion | none
-  extreme_percentile: 90.0   # top 10% = extremos
-  multiplier: 3.0            # gerar 3x a contagem de extremos reais
-  extreme_gan:
-    latent_dim: 32
-    hidden_units: 256
-    epochs: 200
-    batch_size: 64
-    n_critic: 5
-    lambda_gp: 10.0
-    lambda_y: 0.5
-    learning_rate_g: 0.0001
-    learning_rate_d: 0.0001
-    k_shift: 3              # iteracoes de distribution shifting
-    c_shift: 0.3            # fracao descartada por iteracao
-    # tau: 0.05             # prob. alvo para GPD inverse na inferencia
-    use_bias_correction: false  # QDM ERA5→INMET nas features de vento
-    n_quantiles: 100            # resolucao do mapeamento quantil
-  extreme_diffusion:
-    time_steps: 200
-    sampling_steps: 50
-    hidden_units: 512
-    time_emb_dim: 64
-    epochs: 100
-    batch_size: 64
-    p_uncond: 0.1
-    guidance_scale: 5.0
 
 visualization:
   enabled: true

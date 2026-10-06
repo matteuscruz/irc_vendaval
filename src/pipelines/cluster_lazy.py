@@ -16,16 +16,16 @@ _FAST_REGRESSORS = [c for n, c in REGRESSORS if n not in _SLOW_MODELS]
 
 from src.data.netcdf_loader import NetCDFLoader
 from src.data.cluster_assigner import assign_station_clusters
-from src.data.climatology import get_climatology
+from src.data.climatology import get_harmonic_climatology
 from sklearn.metrics import r2_score as _r2_score
 
 from src.pipelines.common import (
-    BASE_FEATURES, TARGET_VAR, RANDOM_STATE,
-    TRAIN_SLICE, VAL_SLICE, TEST_SLICE,
-    build_flat_dataframe, make_split,
+    BASE_FEATURES, ERA5_GUST_PROXY, TARGET_VAR, RANDOM_STATE,
+    build_flat_dataframe, assign_split_labels, default_month_block_split,
+    split_part, split_spec_from_labels,
     parse_cluster_merge, apply_cluster_merge,
-    preprocess_df, month_to_season, resolve_feature_groups,
-    compute_metrics, restrict_to_feature_coverage,
+    preprocess_df, month_to_season, resolve_feature_groups, uses_new_features,
+    compute_metrics, select_complete_rows,
 )
 from src.pipelines.metrics_schema import (
     CORE_RESULTS_COLUMNS, build_results_row, build_predictions_frame,
@@ -60,8 +60,9 @@ def _compute_cluster_neighbors(df: pd.DataFrame, n_neighbors: int) -> dict:
 
 def _write_experiment_meta(
     manager, cluster_merge, merge_groups, cluster_summary, results_df, unified_results_df,
-    synthetic_csv=None, feature_groups: str = "original,era5_18z,bt55",
+    feature_groups: str = "original",
     active_features: list[str] | None = None, ablation_group: str | None = None,
+    split_spec: dict | None = None,
 ):
     best = results_df.loc[results_df.groupby("cluster_id")["R-Squared"].idxmax()]
     best_cols = [c for c in ["cluster_id", "n_stations", "Model", "R-Squared", "RMSE"] if c in best.columns]
@@ -70,13 +71,12 @@ def _write_experiment_meta(
     meta = {
         "cluster_merge": cluster_merge,
         "merge_groups": merge_groups,
-        "synthetic_csv": synthetic_csv,
         "features": BASE_FEATURES,
         "feature_groups": feature_groups,
         "active_features": active_features,
         "ablation_group": ablation_group,
-        "train_slice": list(TRAIN_SLICE),
-        "val_slice": list(VAL_SLICE),
+        "split": split_spec,
+        "climatology": {"method": "harmonic", "n_harmonics": 3},
         "clusters": {
             str(cid): {"n_stations": int(row["n_stations"]), "n_samples": int(row["n_samples"])}
             for cid, row in cluster_summary.iterrows()
@@ -177,17 +177,8 @@ def _plot_seasonal_scatter(out_df, scores, slug, manager, plt):
         tr = out_df[(out_df["split"] == "train") & (out_df["season"] == s_name)]
         vl = out_df[(out_df["split"] == "val") & (out_df["season"] == s_name)]
 
-        has_source = "source" in out_df.columns
-
         if not tr.empty:
-            if has_source:
-                tr_real = tr[tr["source"] == "real"]
-                tr_synth = tr[tr["source"] == "synth"]
-                ax.scatter(tr_real["y_true"], tr_real[best_model], alpha=0.3, s=15, color="blue", label="Treino Real")
-                if not tr_synth.empty:
-                    ax.scatter(tr_synth["y_true"], tr_synth[best_model], alpha=0.3, s=15, color="orange", label="Treino Synth")
-            else:
-                ax.scatter(tr["y_true"], tr[best_model], alpha=0.3, s=15, color="blue", label="Treino")
+            ax.scatter(tr["y_true"], tr[best_model], alpha=0.3, s=15, color="blue", label="Treino")
 
         if not vl.empty:
             ax.scatter(vl["y_true"], vl[best_model], alpha=0.6, s=20, color="red", label="Validação")
@@ -211,9 +202,7 @@ def _plot_seasonal_scatter(out_df, scores, slug, manager, plt):
 def _plot_cluster_train_dist(d, manager, plt):
     import seaborn as sns
     fig, ax = plt.subplots(figsize=(6, 4))
-    sns.kdeplot(d["y_real"], fill=True, label="Real", ax=ax)
-    if len(d["y_synth"]) > 0:
-        sns.kdeplot(d["y_synth"], fill=True, label="Sintético (Augment)", ax=ax)
+    sns.kdeplot(d["y_real"], fill=True, label="Treino", ax=ax)
     ax.set_title(f"Distribuição Rajadas Treino - Cluster {d['cluster_id']}")
     ax.set_xlabel("Rajada Máxima (m/s)")
     ax.set_ylabel("Densidade")
@@ -254,47 +243,12 @@ def _plot_cluster_scatter(cp, manager, plt):
 
 # ── PDF com todos os modelos ──────────────────────────────────────────────────
 
-def _plot_synth_comparison(scores_aug, scores_base, slug, manager, plt):
-    import seaborn as sns
-    merged = pd.merge(
-        scores_base[["Model", "R-Squared"]],
-        scores_aug[["Model", "R-Squared"]],
-        on="Model", suffixes=("_base", "_aug")
-    ).dropna()
-    if merged.empty:
-        return
-
-    merged["diff"] = merged["R-Squared_aug"] - merged["R-Squared_base"]
-    merged = merged.sort_values("diff", ascending=False)
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    sns.barplot(data=merged.head(15), x="diff", y="Model", ax=axes[0], palette="vlag")
-    axes[0].set_title(f"Ganho/Perda R² com Sintéticos (Top 15) - {slug}")
-    axes[0].set_xlabel("Δ R² (Augment - Base)")
-    axes[0].axvline(0, color="k", lw=1)
-
-    axes[1].scatter(merged["R-Squared_base"], merged["R-Squared_aug"], alpha=0.7)
-    g_min = min(merged["R-Squared_base"].min(), merged["R-Squared_aug"].min(), 0)
-    g_max = max(merged["R-Squared_base"].max(), merged["R-Squared_aug"].max(), 1)
-    axes[1].plot([g_min, g_max], [g_min, g_max], "r--")
-    axes[1].set_xlabel("R² (Sem Sintéticos)")
-    axes[1].set_ylabel("R² (Com Sintéticos)")
-    axes[1].set_title("Acima da diagonal = melhora")
-
-    fig.tight_layout()
-    path = manager.get_plot_path("synth_comparison", f"synth_comparison_{slug}.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"   Comparação sintéticos salva: {path.name}")
-
-
 def _plot_all_models_pdf(out_df, scores, slug, manager, plt):
     """Gera um PDF único com o scatter plot de todos os modelos do cluster."""
     from matplotlib.backends.backend_pdf import PdfPages
 
     model_order = scores.sort_values("R-Squared", ascending=False)["Model"].tolist()
-    meta_cols = ["split", "y_true", "season", "cluster_id", "source"]
+    meta_cols = ["split", "y_true", "season", "cluster_id"]
     model_cols = [c for c in out_df.columns if c not in meta_cols]
     
     if not model_cols:
@@ -302,8 +256,6 @@ def _plot_all_models_pdf(out_df, scores, slug, manager, plt):
         
     tr = out_df[out_df["split"] == "train"]
     vl = out_df[out_df["split"] == "val"]
-    has_source = "source" in out_df.columns
-
     pdf_path = manager.get_plot_path("scatter_all", f"scatter_all_{slug}.pdf")
     with PdfPages(pdf_path) as pdf:
         for model in model_order:
@@ -324,21 +276,7 @@ def _plot_all_models_pdf(out_df, scores, slug, manager, plt):
                 yp = split_df[model].values
                 lim = (min(yt.min(), yp.min()), max(yt.max(), yp.max()))
 
-                if has_source and label == "Treino":
-                    is_synth = split_df["source"].values == "synthetic"
-                    ax.scatter(
-                        yt[~is_synth], yp[~is_synth],
-                        alpha=0.35, s=8, color="steelblue", label="Real",
-                    )
-                    if is_synth.any():
-                        ax.scatter(
-                            yt[is_synth], yp[is_synth],
-                            alpha=0.5, s=10, color="darkorange",
-                            marker="^", label="Sintético",
-                        )
-                    ax.legend(fontsize=7, markerscale=1.5)
-                else:
-                    ax.scatter(yt, yp, alpha=0.35, s=8, color="steelblue")
+                ax.scatter(yt, yp, alpha=0.35, s=8, color="steelblue")
 
                 ax.plot(lim, lim, "k--", lw=1)
                 ax.set_xlabel("Observado (m/s)")
@@ -358,52 +296,20 @@ def _plot_all_models_pdf(out_df, scores, slug, manager, plt):
 
 # ── Processamento por cluster ─────────────────────────────────────────────────
 
-def _filter_synth(synth_df_cluster, y_real, synth_n_above, synth_n_below, extreme_percentile):
-    """Filtra e amostra sintéticos por grupo (extremo / normal) para um cluster."""
-    if synth_df_cluster is None or len(synth_df_cluster) == 0:
-        return None
-
-    threshold = float(np.quantile(y_real, extreme_percentile))
-
-    if "is_extreme" in synth_df_cluster.columns:
-        above = synth_df_cluster[synth_df_cluster["is_extreme"]].copy()
-        below = synth_df_cluster[~synth_df_cluster["is_extreme"]].copy()
-    else:
-        above = synth_df_cluster[synth_df_cluster[TARGET_VAR] >= threshold].copy()
-        below = synth_df_cluster[synth_df_cluster[TARGET_VAR] < threshold].copy()
-
-    parts = []
-    if synth_n_above != 0 and len(above):
-        n = synth_n_above if synth_n_above is not None else len(above)
-        parts.append(above.sample(n=min(n, len(above)), replace=n > len(above), random_state=42))
-    if synth_n_below and len(below):
-        parts.append(below.sample(n=min(synth_n_below, len(below)), replace=synth_n_below > len(below), random_state=42))
-
-    if not parts:
-        return None
-    result = pd.concat(parts, ignore_index=True)
-    n_above_used = int((result[TARGET_VAR] >= threshold).sum())
-    n_below_used = len(result) - n_above_used
-    print(f"   Sintéticos selecionados: {n_above_used} extremos + {n_below_used} normais (threshold={threshold:.1f} m/s)")
-    return result
-
-
-def _process_one_cluster(cid, group, synth_df, manager, plt,
-                         synth_n_above=None, synth_n_below=0,
-                         extreme_percentile=0.90, season=None,
+def _process_one_cluster(cid, group, manager, plt, season=None,
                          neighbor_data=None, eval_window="monthly",
-                         active_features=None,
+                         active_features=None, split_spec=None,
                          validation_mode="temporal", spatial_n_folds=5, spatial_seed=42):
     label = f"Cluster {cid}" + (f" / {season}" if season else "")
     n_stations = group["estacao"].nunique()
-    df_tr = make_split(group, TRAIN_SLICE)
-    df_vl = make_split(group, VAL_SLICE)
-    df_te = make_split(group, TEST_SLICE)
+    df_tr = split_part(group, "train")
+    df_vl = split_part(group, "val")
+    df_te = split_part(group, "test")
 
     # Incorpora dados reais de clusters vizinhos ao treino (validação/teste
     # permanecem apenas no cluster alvo para medir performance sem contaminação)
     if neighbor_data is not None and not neighbor_data.empty:
-        df_tr_neigh = make_split(neighbor_data, TRAIN_SLICE)
+        df_tr_neigh = split_part(neighbor_data, "train")
         if not df_tr_neigh.empty:
             n_neigh = len(df_tr_neigh)
             df_tr = pd.concat([df_tr, df_tr_neigh], ignore_index=True)
@@ -421,26 +327,14 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
         print(f"   {label}: sem dados suficientes — pulando.")
         return
 
-    # Teste (2024) nunca influencia a seleção do modelo (só val faz isso) —
-    # é só calculado depois, com o vencedor já escolhido. Falta de teste num
+    # O teste nunca influencia a seleção do modelo (só val faz isso) — é só
+    # calculado depois, com o vencedor já escolhido. Falta de teste num
     # cluster/season específico não pula o cluster, só desliga esse bloco.
     has_test = not df_te.empty
     if not has_test:
-        print(f"   {label}: sem dados de teste (2024) — val segue valendo pra seleção, teste omitido.")
+        print(f"   {label}: sem dados de teste — val segue valendo pra seleção, teste omitido.")
 
-    # Climatologia por estação
-    gust_p50_station = df_tr.groupby("estacao")[TARGET_VAR].median()
-    gust_p50_cluster = float(df_tr[TARGET_VAR].median())
-    df_tr = df_tr.copy()
-    df_vl = df_vl.copy()
-    df_tr["gust_P50"] = df_tr["estacao"].map(gust_p50_station)
-    df_vl["gust_P50"] = df_vl["estacao"].map(gust_p50_station).fillna(gust_p50_cluster)
-    if has_test:
-        df_te = df_te.copy()
-        df_te["gust_P50"] = df_te["estacao"].map(gust_p50_station).fillna(gust_p50_cluster)
-
-    _features = active_features if active_features is not None else BASE_FEATURES
-    train_features = [f for f in _features + ["gust_P50"] if f in df_tr.columns and df_tr[f].notna().any()]
+    train_features = list(active_features if active_features is not None else BASE_FEATURES)
 
     x_train = df_tr[train_features].reset_index(drop=True)
     y_train = df_tr[TARGET_VAR].reset_index(drop=True)
@@ -453,53 +347,17 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     y_test = df_te[TARGET_VAR].reset_index(drop=True) if has_test else None
 
     y_real_train = y_train.to_numpy(float)
-    y_synth_train = np.array([], dtype=float)
-    has_synth = False
-    synth_seasons_list = []
 
     x_train_orig = x_train.copy()
-    y_train_orig = y_train.copy()
 
-    if synth_df is not None:
-        # Inclui sintéticos do cluster alvo e dos vizinhos
-        neighbor_cids = (
-            [str(c) for c in neighbor_data["cluster_id"].unique()]
-            if neighbor_data is not None and not neighbor_data.empty
-            else []
-        )
-        all_cids = {str(cid)} | set(neighbor_cids)
-        s_raw = synth_df[synth_df["cluster_id"].astype(str).isin(all_cids)]
-        if season is not None and "season" in s_raw.columns:
-            s_raw = s_raw[s_raw["season"] == season]
-        s = _filter_synth(s_raw if len(s_raw) else None, y_real_train,
-                          synth_n_above, synth_n_below, extreme_percentile)
-        if s is not None and len(s):
-            has_synth = True
-            y_synth_train = s[TARGET_VAR].to_numpy(float)
-            s = s.copy()
-            s["gust_P50"] = gust_p50_cluster
-            x_synth = s.reindex(columns=train_features).reset_index(drop=True)
-            x_train = pd.concat([x_train, x_synth], ignore_index=True)
-            y_train = pd.concat(
-                [y_train, s[TARGET_VAR].reset_index(drop=True)], ignore_index=True
-            )
-            synth_seasons_list = (
-                s["season"].reset_index(drop=True).tolist()
-                if "season" in s.columns
-                else [None] * len(s)
-            )
-            print(f"   +{len(s)} linhas sintéticas no treino")
-
-    train_season_labels = (
-        month_to_season(times_train.dt.month).tolist() + synth_seasons_list
-    )
+    train_season_labels = month_to_season(times_train.dt.month).tolist()
 
     _plot_cluster_train_dist(
-        {"cluster_id": cid, "y_real": y_real_train, "y_synth": y_synth_train},
+        {"cluster_id": cid, "y_real": y_real_train},
         manager, plt,
     )
 
-    # Cópia crua (real+sintético, pré-scaling) — usada só pra pré-processar
+    # Cópia crua (pré-scaling) — usada só pra pré-processar
     # x_test de forma consistente com o x_train que o modelo realmente vê.
     x_train_full_raw = x_train.copy()
 
@@ -509,16 +367,6 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     x_test_pp = None
     if has_test:
         _, x_test_pp = preprocess_df(x_train_full_raw, x_test)
-
-    # Baseline sem sintéticos (só se houver augment)
-    scores_base = None
-    if has_synth:
-        x_tr_orig_pp, _ = preprocess_df(x_train_orig.copy(), x_val.copy())
-        print("   [baseline] Rodando LazyPredict sem sintéticos...")
-        reg_base = LazyRegressor(verbose=0, ignore_warnings=True, predictions=False,
-                                 random_state=RANDOM_STATE, regressors=_FAST_REGRESSORS)
-        scores_base, _ = reg_base.fit(x_tr_orig_pp, x_val, y_train_orig, y_val)
-        scores_base = scores_base.reset_index().rename(columns={"index": "Model"})
 
     print(f"   {label}: rodando LazyPredict ({len(_FAST_REGRESSORS)} modelos)...", flush=True)
     reg = LazyRegressor(verbose=0, ignore_warnings=True, predictions=True,
@@ -564,8 +412,6 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     val_df.insert(0, "y_true", y_val.values)
     val_df.insert(0, "split", "val")
 
-    n_real_train = len(y_real_train)
-
     fitted = {}
     try:
         fitted = reg.provide_models(x_train, x_val, y_train, y_val)
@@ -576,16 +422,12 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
         }
         train_df = pd.DataFrame(train_rows, index=range(len(x_train)))
         train_df.insert(0, "y_true", y_train.values)
-        source_labels = ["real"] * n_real_train + ["synthetic"] * (len(x_train) - n_real_train)
-        train_df.insert(0, "source", source_labels)
         train_df.insert(0, "season", train_season_labels)
         train_df.insert(0, "split", "train")
-        val_df.insert(0, "source", "real")
         val_df.insert(0, "season", month_to_season(times_val.dt.month).values)
         out_df = pd.concat([train_df, val_df], ignore_index=True)
     except Exception as e:
         print(f"   [AVISO] Train predictions indisponíveis: {e}")
-        val_df.insert(0, "source", "real")
         val_df.insert(0, "season", month_to_season(times_val.dt.month).values)
         out_df = val_df
 
@@ -683,19 +525,9 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
         holdout_chunks = []
         for fold in iter_holdout_folds(
             group, mode=validation_mode, n_folds=spatial_n_folds, seed=spatial_seed,
-            clim_value_col=TARGET_VAR,
         ):
-            # gust_P50: mesma lógica de fallback já usada no split temporal —
-            # média por estação no treino do fold, cluster-mean se a estação
-            # held-out não aparecer no treino (sempre o caso aqui). Calculado
-            # ANTES de `fold_features` — senão a coluna ainda não existiria em
-            # `fold.df_train` e ficaria de fora do conjunto de features do fold.
-            gp50_fold = fold.df_train.groupby("estacao")[TARGET_VAR].median()
-            gp50_fold_cluster = float(fold.df_train[TARGET_VAR].median())
-            df_tr_f = fold.df_train.copy()
-            df_ev_f = fold.df_eval.copy()
-            df_tr_f["gust_P50"] = df_tr_f["estacao"].map(gp50_fold)
-            df_ev_f["gust_P50"] = df_ev_f["estacao"].map(gp50_fold).fillna(gp50_fold_cluster)
+            df_tr_f = fold.df_train
+            df_ev_f = fold.df_eval
 
             # Reindexa para o schema COMPLETO de `train_features` (não um
             # subconjunto filtrado por fold) — o estimador campeão clonado
@@ -703,9 +535,6 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
             # ColumnTransformer que espera exatamente os nomes de coluna
             # vistos no fit original (temporal); um subconjunto diferente
             # levanta "A given column is not a column of the dataframe".
-            # Colunas ausentes/100%-NaN neste fold (ex.: features ERA5-18UTC/
-            # BT55 fora da cobertura do Paraná) viram NaN e são preenchidas
-            # pelo imputer em `preprocess_df` (keep_empty_features=True).
             x_tr_f = df_tr_f.reindex(columns=train_features).reset_index(drop=True)
             y_tr_f = df_tr_f[TARGET_VAR].reset_index(drop=True)
             x_ev_f = df_ev_f.reindex(columns=train_features).reset_index(drop=True)
@@ -779,28 +608,30 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
     )
 
     # ── Serializar o melhor modelo para inferência espacial ────────────────
-    # Salva: modelo fitado + imputer + scaler + lista de features. Persiste
+    # Salva: modelo fitado + scaler + lista de features. Persiste
     # tanto o modelo pooled (season=None) quanto os campeões por trimestre —
     # antes só o pooled era salvo, então o vencedor "por trimestre" da tabela
     # de ablation nunca chegava a ser usado na inferência espacial.
     if fitted and best_model in fitted:
         import joblib
-        from sklearn.impute import SimpleImputer
         from sklearn.preprocessing import RobustScaler
 
-        # Reconstruir imputer/scaler (mesma lógica de preprocess_df)
-        # x_train_orig contém os dados REAIS pré-preprocess (sem sintéticos, sem scaling)
-        _imputer = SimpleImputer(strategy="mean").fit(x_train_orig)
-        _scaler = RobustScaler().fit(_imputer.transform(x_train_orig))
+        # Reconstruir scaler (mesma lógica de preprocess_df)
+        # x_train_orig contém os dados pré-preprocess (sem scaling)
+        _scaler = RobustScaler().fit(x_train_orig)
 
         artifact = {
             "model": fitted[best_model],
             "model_name": best_model,
-            "imputer": _imputer,
             "scaler": _scaler,
             "features": list(train_features),
             "cluster_id": cid,
             "season": season,
+            # A inferência em grade precisa reproduzir EXATAMENTE a mesma
+            # climatologia: harmônica ajustada nos dias de treino desta
+            # partição (ver src/inference/grid_direct_predict.py).
+            "split": split_spec,
+            "climatology": {"method": "harmonic", "n_harmonics": 3},
             "r2": float(scores.loc[scores["Model"] == best_model, "R-Squared"].iloc[0]),
             # LazyPredict prevê o valor absoluto (m/s), não uma razão sobre
             # o ERA5 — usado por SpatialCorrector pra decidir a reconstrução
@@ -815,16 +646,42 @@ def _process_one_cluster(cid, group, synth_df, manager, plt,
 
     _plot_seasonal_scatter(out_df, scores, slug, manager, plt)
     _plot_all_models_pdf(out_df, scores, slug, manager, plt)
-    if scores_base is not None:
-        _plot_synth_comparison(scores, scores_base, slug, manager, plt)
     print(f"[lazy_clusters] {label} concluído e salvo.")
 
 
+def _recover_from_artifacts(manager) -> tuple[dict | None, list[str] | None]:
+    """Partição e features EFETIVAMENTE usadas, lidas de um artefato treinado.
+
+    A agregação roda num processo separado (`--aggregate-only`, é assim que o
+    Modal orquestra), que não carrega os dados e portanto não conhece nem a
+    partição nem as features resolvidas em runtime. Sem isso o `run_meta.json`
+    registrava `split: null` e `active_features: null` — justamente os campos
+    que dizem o que a execução fez. O artefato do modelo é a fonte certa:
+    é o que de fato treinou.
+    """
+    import joblib
+
+    for path in sorted(manager.get_model_dir().glob("best_model_c*.joblib")):
+        try:
+            art = joblib.load(path)
+        except Exception as exc:
+            print(f"[lazy_clusters] AVISO: {path.name} ilegível ({exc}) — tentando o próximo.")
+            continue
+        return art.get("split"), list(art.get("features", [])) or None
+    print("[lazy_clusters] AVISO: nenhum artefato legível — run_meta sem split/active_features.")
+    return None, None
+
+
 def _build_aggregate(
-    manager, cluster_merge, synthetic_csv, plt, sns,
-    feature_groups: str = "original,era5_18z,bt55",
+    manager, cluster_merge, plt, sns,
+    feature_groups: str = "original",
     active_features: list[str] | None = None, ablation_group: str | None = None,
+    split_spec: dict | None = None,
 ):
+    if split_spec is None or active_features is None:
+        recovered_split, recovered_features = _recover_from_artifacts(manager)
+        split_spec = split_spec or recovered_split
+        active_features = active_features or recovered_features
     partial_dir = manager.get_partial_dir("clusters")
     partials = sorted(partial_dir.glob("cluster_*.csv"))
     if not partials:
@@ -918,20 +775,18 @@ def _build_aggregate(
         merge_groups=parse_cluster_merge(cluster_merge),
         cluster_summary=cluster_summary, results_df=results_df,
         unified_results_df=unified_results_df,
-        synthetic_csv=synthetic_csv,
         feature_groups=feature_groups, active_features=active_features,
-        ablation_group=ablation_group,
+        ablation_group=ablation_group, split_spec=split_spec,
     )
 
 
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 def load_lazy_training_frame(
-    raw_dir: str, shp_dir: str, feature_groups: str,
-    restrict_coverage: bool = False, cluster_merge=None,
+    raw_dir: str, shp_dir: str, feature_groups: str, cluster_merge=None,
 ) -> pd.DataFrame:
-    """NetCDF → clusters → climatologia → dataframe de features → cobertura
-    → merge de clusters. Extraído de `run()` sem mudança de lógica."""
+    """NetCDF → clusters → climatologia → dataframe de features → linhas
+    completas (clusters cobertos, sem NaN) → merge de clusters."""
     print("[lazy_clusters] Carregando NetCDF...")
     ds_inmet, ds_era5 = NetCDFLoader(raw_dir).load_extended()
     print(f"  Estações: {len(ds_inmet.estacao.values)} | ERA5 features: {list(ds_era5.data_vars)}")
@@ -940,14 +795,28 @@ def load_lazy_training_frame(
     station_clusters = assign_station_clusters(ds_inmet, shp_dir)
     print(station_clusters.to_string(index=False))
 
-    print("[lazy_clusters] Calculando climatologia...")
-    ds_clim = get_climatology(ds_inmet, TARGET_VAR, slice(*TRAIN_SLICE))
+    # Split por blocos de mês resolvido ANTES da climatologia: ela é ajustada
+    # só nos dias de treino, então precisa da mesma partição que o treino usa.
+    times = pd.DatetimeIndex(ds_era5["time"].values)
+    split = default_month_block_split(times.values)
+    labels = split.label(times)
+    print(
+        f"[lazy_clusters] Split por blocos de mês: teste={list(split.test_months)}, "
+        f"{len(split.val_units)} blocos (ano, mês) de validação."
+    )
+
+    print("[lazy_clusters] Climatologia ERA5 harmônica (dias de treino)...")
+    ds_clim = get_harmonic_climatology(
+        ds_era5, ERA5_GUST_PROXY, times[labels == "train"],
+    ).reset_coords(drop=True)
 
     print("[lazy_clusters] Construindo DataFrame de features...")
     df = build_flat_dataframe(ds_inmet, ds_era5, station_clusters, ds_clim)
     print(f"  Shape total: {df.shape}")
-    if restrict_coverage:
-        df = restrict_to_feature_coverage(df, feature_groups)
+    df, _ = assign_split_labels(df, split)
+    df = select_complete_rows(
+        df, resolve_feature_groups(feature_groups, df.columns), label="lazy_clusters",
+    )
 
     merge_groups = parse_cluster_merge(cluster_merge)
     if merge_groups:
@@ -959,10 +828,9 @@ def load_lazy_training_frame(
 
 
 def run_cluster_season_loop(
-    df: pd.DataFrame, synth_df, manager, plt, *,
+    df: pd.DataFrame, manager, plt, *,
     cluster_id=None, stratify_seasons: bool = True, n_neighbor_clusters: int = 1,
-    synth_n_above=None, synth_n_below: int = 0, extreme_percentile: float = 0.90,
-    eval_window: str = "monthly", active_features=None,
+    eval_window: str = "monthly", active_features=None, split_spec=None,
     validation_mode: str = "temporal", spatial_n_folds: int = 5, spatial_seed: int = 42,
 ) -> None:
     """Loop cluster × trimestre chamando `_process_one_cluster` (já
@@ -1005,14 +873,12 @@ def run_cluster_season_loop(
                 continue
             print(f"── {label} | {group['estacao'].nunique()} estação(ões) ──")
             _process_one_cluster(
-            cid, group, synth_df, manager, plt,
-            synth_n_above=synth_n_above,
-            synth_n_below=synth_n_below,
-            extreme_percentile=extreme_percentile,
+            cid, group, manager, plt,
             season=season,
             neighbor_data=neighbor_data,
             eval_window=eval_window,
             active_features=active_features,
+            split_spec=split_spec,
             validation_mode=validation_mode,
             spatial_n_folds=spatial_n_folds,
             spatial_seed=spatial_seed,
@@ -1024,10 +890,6 @@ def run(
     shp_dir: str = "dataset/shp",
     output_dir: str = "artifacts/lazy_clusters",
     cluster_merge=None,
-    synthetic_csv=None,
-    synth_n_above=None,
-    synth_n_below: int = 0,
-    extreme_percentile: float = 0.90,
     stratify_seasons: bool = True,
     n_neighbor_clusters: int = 1,
     eval_window: str = "monthly",
@@ -1035,8 +897,7 @@ def run(
     cluster_id=None,
     aggregate_only: bool = False,
     list_clusters: bool = False,
-    feature_groups: str = "original,era5_18z,bt55",
-    restrict_coverage: bool = False,
+    feature_groups: str = "original",
     ablation_group: str | None = None,
     validation_mode: str = "temporal",
     spatial_n_folds: int = 5,
@@ -1051,12 +912,12 @@ def run(
     manager = ArtifactManager(output_dir, exp_name)
     print(f"[lazy_clusters] Experimento: {manager.root}")
 
-    active_features = resolve_feature_groups(feature_groups)
-    print(f"[lazy_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
-
     if aggregate_only:
+        # Só relê os parciais — as features novas (`nf_*`) só são conhecidas
+        # depois de carregar os dados, então o meta registra o spec.
+        active_features = None if uses_new_features(feature_groups) else resolve_feature_groups(feature_groups)
         _build_aggregate(
-            manager, cluster_merge, synthetic_csv, plt, sns,
+            manager, cluster_merge, plt, sns,
             feature_groups=feature_groups, active_features=active_features,
             ablation_group=ablation_group,
         )
@@ -1083,31 +944,26 @@ def run(
         print("CLUSTERS_JSON:" + json.dumps([str(c) for c in clusters_present_light]))
         return None
 
-    synth_df = None
-    if synthetic_csv:
-        synth_df = pd.read_csv(synthetic_csv)
-        print(f"[lazy_clusters] Augment: {len(synth_df)} linhas sintéticas de {synthetic_csv}")
-
-    df = load_lazy_training_frame(
-        raw_dir, shp_dir, feature_groups,
-        restrict_coverage=restrict_coverage, cluster_merge=cluster_merge,
-    )
+    df = load_lazy_training_frame(raw_dir, shp_dir, feature_groups, cluster_merge=cluster_merge)
+    active_features = resolve_feature_groups(feature_groups, df.columns)
+    split_spec = split_spec_from_labels(df)
+    print(f"[lazy_clusters] Grupos de features: {feature_groups} ({len(active_features)} features)")
 
     run_cluster_season_loop(
-        df, synth_df, manager, plt,
+        df, manager, plt,
         cluster_id=cluster_id, stratify_seasons=stratify_seasons,
         n_neighbor_clusters=n_neighbor_clusters,
-        synth_n_above=synth_n_above, synth_n_below=synth_n_below,
-        extreme_percentile=extreme_percentile, eval_window=eval_window,
-        active_features=active_features, validation_mode=validation_mode,
+        eval_window=eval_window,
+        active_features=active_features, split_spec=split_spec,
+        validation_mode=validation_mode,
         spatial_n_folds=spatial_n_folds, spatial_seed=spatial_seed,
     )
 
     if cluster_id is None:
         _build_aggregate(
-            manager, cluster_merge, synthetic_csv, plt, sns,
+            manager, cluster_merge, plt, sns,
             feature_groups=feature_groups, active_features=active_features,
-            ablation_group=ablation_group,
+            ablation_group=ablation_group, split_spec=split_spec,
         )
 
     return None

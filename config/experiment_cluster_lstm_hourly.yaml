@@ -1,0 +1,58 @@
+version: 2
+# LSTM por cluster, fonte HORÁRIA (src/pipeline/data/hourly_builder.py).
+# Único cluster com arquivo horário hoje: cluster 3 (test_cluster_3_hourly.nc,
+# 21 estações) — os demais geram só um aviso e ficam de fora, sem precisar de
+# flag de escopo. Features vêm de `data.hourly` (12 variáveis horárias do
+# ERA5, sem new_features/ERA5-Basin — data.feature_groups não se aplica aqui).
+# Mesmo alvo diário (daily_wind_gust_max): o que muda é a pipeline enxergar as
+# 24 horas do dia D em vez da agregação mean/max/std já feita.
+#
+# Clone de experiment_cluster_lstm_modal.yaml com resolution: hourly.
+
+experiment:
+  name: cluster_lstm_v2_hourly
+  seed: 42
+  deterministic: false
+  output_dir: /artifacts/modal/experiments
+
+data:
+  raw_dir: /dataset/raw
+  shp_dir: /dataset/shp
+  target_var: daily_wind_gust_max
+  resolution: hourly
+  split:
+    scheme: month_block
+    test_months: [1, 4, 7, 10]
+    val_fraction: 0.15
+    val_stratify_by_month: true
+    date_range: null
+    purge: strict
+  climatology:
+    method: harmonic
+    n_harmonics: 3
+  hourly:
+    file: test_cluster_3_hourly.nc
+    features: null                      # null = HOURLY_FEATURES (ws_h, wd_h, sin/cos_dir_h, msl_h, t2m_h, rh_h, td_dep_h, tp_h, tp_roll{24,48,72}h)
+    daily_context_features: null        # null = sazonalidade (day/month sin/cos)
+    day_offset_hours: 0                 # 3 = dia local UTC-3
+
+preprocessing:
+  lookback: 7                 # ignorado no horário — a janela é sempre as 24h de D
+
+model:
+  name: cluster_lstm
+  params:
+    units: 96
+    dropout: 0.3
+    huber_delta: 1.0
+    learning_rate: 0.001
+
+training:
+  epochs: 50
+  batch_size: 64
+  patience: 5
+  min_samples: 10
+
+visualization:
+  enabled: true
+  save_dir: plots

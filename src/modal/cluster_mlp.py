@@ -61,8 +61,6 @@ REMOTE_DATASET_DIR = "/dataset"
 DATASET_SENTINELS = [
     "raw/INMET_Stratified.nc",
     "raw/ERA5_Stratified.nc",
-    "raw/dados_era5_parana_18utc",
-    "raw/dados_temperatura_brilho_BT55",
     "raw/ERA5_Features_Basin_2000_2026.nc",
 ]
 
@@ -91,10 +89,6 @@ image = (
         "geopandas>=0.14.0",
         "pyshp>=2.3.0",
         "shap>=0.46.0",
-        # BT55: leitura de parquets mensais
-        "pyarrow>=14.0.0",
-        # ERA5-18UTC: xarray usa dask internamente
-        "dask>=2024.1.0",
     )
     .env({"MPLBACKEND": "Agg", "PYTHONUNBUFFERED": "1"})
     .add_local_file(
@@ -137,6 +131,33 @@ def _dataset_exists_in_volume() -> bool:
         return False
 
 
+def _sync_new_features(local_raw: Path) -> None:
+    """Sobe arquivos de dataset/raw/new_features ausentes (ou com tamanho
+    diferente) no volume — features novas entram sem re-enviar o dataset
+    inteiro. Caches locais (`_*`) não sobem."""
+    local_root = local_raw / "new_features"
+    if not local_root.is_dir():
+        return
+    try:
+        remote = {
+            e.path.lstrip("/"): e.size
+            for e in dataset_volume.listdir("/raw/new_features", recursive=True)
+        }
+    except Exception:
+        remote = {}
+    pending = [
+        f for f in sorted(local_root.rglob("*.nc"))
+        if not f.name.startswith("_")
+        and remote.get(f"raw/{f.relative_to(local_raw).as_posix()}") != f.stat().st_size
+    ]
+    if not pending:
+        return
+    print(f"Enviando {len(pending)} arquivo(s) novo(s) de new_features para o volume...")
+    with dataset_volume.batch_upload(force=True) as upload:
+        for f in pending:
+            upload.put_file(str(f), f"/raw/{f.relative_to(local_raw).as_posix()}")
+
+
 def _ensure_dataset(force: bool = False) -> None:
     local_raw = _local_root / "dataset" / "raw"
     local_shp = _local_root / "dataset" / "shp"
@@ -153,6 +174,7 @@ def _ensure_dataset(force: bool = False) -> None:
             f"Dataset já disponível no volume "
             f"'{DATASET_VOLUME_NAME}' — pulando upload."
         )
+        _sync_new_features(local_raw)
         return
 
     action = "Re-enviando" if force else "Enviando"
@@ -193,10 +215,8 @@ def run_mlp_clusters(
     extreme_power: float = 2.0,
     max_iter: int = 500,
     cluster_merge: str | None = None,
-    synthetic_csv: str | None = None,
     exp_name: str | None = None,
     feature_groups: str | None = None,
-    restrict_coverage: bool = False,
     ablation_group: str | None = None,
 ) -> list[str]:
     """
@@ -216,19 +236,6 @@ def run_mlp_clusters(
     if cluster_merge:
         print(f"[modal] cluster_merge: {cluster_merge}")
 
-    # CSV sintético: caminho relativo ao volume de artefatos (já montado em
-    # /artifacts). Ex.: "gan_augment/exp1/synthetic_augment.csv".
-    synthetic_path = None
-    if synthetic_csv:
-        synthetic_path = (
-            synthetic_csv if synthetic_csv.startswith("/")
-            else f"{REMOTE_ARTIFACTS_DIR}/{synthetic_csv}"
-        )
-        if not Path(synthetic_path).exists():
-            raise FileNotFoundError(
-                f"CSV sintético não encontrado no volume: {synthetic_path}"
-            )
-        print(f"[modal] augment: {synthetic_path}")
 
     # Cada run cria seu próprio exp{n} dentro de output_dir — não limpamos
     # o diretório para preservar os experimentos anteriores e o índice.
@@ -254,14 +261,10 @@ def run_mlp_clusters(
     ]
     if cluster_merge:
         cmd += ["--cluster-merge", cluster_merge]
-    if synthetic_path:
-        cmd += ["--synthetic-csv", synthetic_path]
     if exp_name:
         cmd += ["--exp-name", exp_name]
     if feature_groups:
         cmd += ["--feature-groups", feature_groups]
-    if restrict_coverage:
-        cmd += ["--restrict-coverage"]
     if ablation_group:
         cmd += ["--ablation-group", ablation_group]
 
@@ -434,10 +437,8 @@ def main(
     extreme_power: float = 2.0,
     max_iter: int = 500,
     cluster_merge: str = "",
-    synthetic_csv: str = "",
     exp_name: str = "",
     feature_groups: str = "",
-    restrict_coverage: bool = False,
     ablation_group: str = "",
     spatial_year: str = "2023",
     spatial_smoothing: str = "gaussian",
@@ -449,23 +450,19 @@ def main(
     --no-download          Roda mas não baixa artefatos
     --only-download        Só baixa; não roda
     --only-upload-dataset  Só sincroniza dataset/raw+shp pro volume; não roda
-                           nem baixa (volume compartilhado por lazy/mlp/lstm/gan)
+                           nem baixa (volume compartilhado por lazy/mlp/lstm)
     --local-dir            Destino local (default: artifacts/mlp_modal)
     --force-dataset-upload Re-envia dataset mesmo se já no volume
     --hidden-layers        Camadas ocultas (default: "128,64")
     --alpha                Regularização L2 (default: 0.001)
     --extreme-power        Expoente do sample_weight (default: 2.0)
     --cluster-merge        Agrega clusters, ex: "1-2-3,5-6"
-    --synthetic-csv        CSV sintético — local (é enviado ao volume) ou já
-                           relativo ao volume, ex:
-                           "gan_clusters/exp1/synthetic_augment.csv"
     --exp-name             Nome do experimento; senão autoincrementa exp{n}
-    --feature-groups       Grupos separados por vírgula: original, era5_18z,
-                           bt55 (default: todos)
-    --restrict-coverage    Restringe às estações com cobertura REAL de
-                           era5_18z/bt55 (~46-57/243) em vez de imputar NaN
-                           nas demais — recomendado com --feature-groups
-                           incluindo era5_18z/bt55 (ex: braço "newfeatures")
+    --feature-groups       Grupos separados por vírgula: original, era5_basin,
+                           new_features, new_features_static,
+                           new_features_dynamic (ou 'all'; default: original).
+                           Com qualquer new_features*, só treinam clusters
+                           100% cobertos pelas features pedidas
     --ablation-group       Tag opcional p/ agrupar experimentos de ablation
     --spatial-year         Ano para gerar mapa corrigido (default: 2023)
     --spatial-smoothing    Suavização: gaussian | none (default: gaussian)
@@ -483,19 +480,6 @@ def main(
 
     _ensure_dataset(force=force_dataset_upload)
 
-    # Augment: se for um arquivo local, sobe para o volume; se já for um
-    # caminho relativo ao volume, usa como está.
-    remote_synth = ""
-    if synthetic_csv:
-        if Path(synthetic_csv).exists():
-            remote_synth = "_augment_input/synthetic_augment.csv"
-            print(f"\nEnviando CSV sintético para o volume: {remote_synth}")
-            with artifact_volume.batch_upload(force=True) as up:
-                up.put_file(synthetic_csv, f"/{remote_synth}")
-        else:
-            import re as _re
-            remote_synth = _re.sub(r"^artifacts/[^/]+/", "", synthetic_csv)
-
     print("\nSubmetendo pipeline MLP × Cluster...")
     created_files = run_mlp_clusters.remote(
         hidden_layers=hidden_layers,
@@ -503,10 +487,8 @@ def main(
         extreme_power=extreme_power,
         max_iter=max_iter,
         cluster_merge=cluster_merge or None,
-        synthetic_csv=remote_synth or None,
         exp_name=exp_name or None,
         feature_groups=feature_groups or None,
-        restrict_coverage=restrict_coverage,
         ablation_group=ablation_group or None,
     )
 

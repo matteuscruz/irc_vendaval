@@ -20,7 +20,6 @@ Historicamente, árvores e boosting costumam dominar o ranking, como:
 
 ## Modos importantes
 
-- `--synthetic-csv`: injeta dados sintéticos do GAN no treino.
 - `--n-neighbor-clusters`: adiciona dados de clusters vizinhos.
 - `--stratify-seasons`: separa o treino por trimestre climático.
 - `--eval-window`: mede estabilidade em janelas mensais ou quinzenais.

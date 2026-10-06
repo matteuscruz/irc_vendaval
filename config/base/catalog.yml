@@ -1,0 +1,39 @@
+# Catálogo Kedro — vazio de propósito pro grafo principal (`treino` /
+# `selecao_e_correcao`). Os datasets intermediários desses dois (lazy_artifacts,
+# mlp_artifacts, winners_table, etc.) não têm entrada aqui de propósito: sem
+# entrada, o Kedro trata cada um como MemoryDataset automaticamente, o que já
+# é suficiente pro `kedro viz` desenhar o grafo. As pipelines de verdade fazem
+# sua própria leitura/escrita em disco (raw_dir/output_dir passados como
+# parâmetro — ver config/base/parameters.yml e src/irc_vendaval_kedro/nodes.py),
+# não passam pelo DataCatalog do Kedro.
+#
+# Exceção: a pipeline `lazy_amostra` (kedro run --pipeline=lazy_amostra) É
+# executada de verdade (numa amostra mínima, 1 cluster só) especificamente
+# pra inspecionar os dados em cada passo — essas 3 entradas dão a esses
+# dataframes um arquivo real em disco, o que habilita a prévia em tabela do
+# `kedro viz` (clique no nó → aba "Preview").
+lazy_training_frame_sample:
+  type: pandas.CSVDataset
+  filepath: data/03_primary/lazy_training_frame_sample.csv
+  load_args:
+    parse_dates: ["time"]
+  metadata:
+    kedro-viz:
+      preview_args:
+        nrows: 10
+
+lazy_sample_results:
+  type: pandas.CSVDataset
+  filepath: data/07_model_output/lazy_sample_results.csv
+  metadata:
+    kedro-viz:
+      preview_args:
+        nrows: 10
+
+lazy_sample_predictions:
+  type: pandas.CSVDataset
+  filepath: data/07_model_output/lazy_sample_predictions.csv
+  metadata:
+    kedro-viz:
+      preview_args:
+        nrows: 10

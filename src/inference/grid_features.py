@@ -8,29 +8,12 @@ estações naquele dia — em 2000 (2 estações ativas) ~42% da bacia fica sem
 valor. Aqui o modelo é aplicado diretamente na célula, usando as features
 ERA5 daquela célula, então toda célula da bacia recebe valor todo dia.
 
-Custo dessa escolha (medido, não suposto — ver a análise que originou este
-módulo): 6 features do treino dependem de haver uma estação INMET medindo no
-ponto e não existem numa célula de grade:
-
-    lag1_gust_obs, lag2_gust_obs, lag3_gust_obs, rolling7d_gust_obs
-        lags/rolling da própria rajada OBSERVADA (o alvo em dias anteriores)
-    gust_P50
-        mediana do alvo observado por estação no período de treino
-    era5_clim_wind  (SOMENTE para modelos lazy)
-        cluster_lazy.py monta essa climatologia a partir de ds_inmet/TARGET_VAR
-        (observação), enquanto cluster_mlp.py e o preprocessor do LSTM a montam
-        a partir do ERA5 (ERA5_GUST_PROXY) — esta última É derivável na grade e
-        é o que este módulo produz.
-
-Elas entram como NaN e são preenchidas pelo `imputer` salvo junto de cada
-modelo (mesmo comportamento do treino para valores ausentes). Degradação
-medida no split de validação: ~14% de R² para mlp/lstm (só os 4 lags faltam)
-e ~45% para lazy (que também perde era5_clim_wind, sua feature mais
-importante). Mesmo degradado, o lazy venceu 8/8 dos combos disputados contra
-a melhor alternativa não-lazy, então nenhum pipeline é excluído.
+Todas as features do modelo são derivadas do ERA5 (ou de calendário/
+coordenadas) — o INMET entra só como alvo no treino — então a célula tem
+exatamente o mesmo vetor de entrada que a estação teve.
 
 As features derivadas do ERA5 são construídas com o MESMO código canônico do
-treino (`rebuild_original_from_basin`, `get_climatology`) — que é aritmética
+treino (`rebuild_original_from_basin`) — que é aritmética
 xarray agnóstica a dimensões, e portanto vale igual para (time, estacao) e
 para (time, latitude, longitude). Isso é o que garante que a distribuição das
 features na grade bata com a que os modelos viram no treino.
@@ -44,17 +27,11 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from src.data.climatology import get_climatology
+from src.data.new_features import new_features_to_points
 from src.data.original_features_basin import rebuild_original_from_basin
-from src.pipelines.common import ERA5_GUST_PROXY, TRAIN_SLICE, month_to_season
+from src.pipelines.common import ERA5_GUST_PROXY, month_to_season
 
 ERA5_BASIN_FILE = "ERA5_Features_Basin_2000_2026.nc"
-
-# Features que só existem onde há estação INMET medindo (ver docstring).
-STATION_ONLY_FEATURES = [
-    "lag1_gust_obs", "lag2_gust_obs", "lag3_gust_obs", "rolling7d_gust_obs",
-    "gust_P50",
-]
 
 
 def _to_basin_names(ds: xr.Dataset) -> xr.Dataset:
@@ -87,10 +64,9 @@ def load_grid_features(raw_dir: str | Path) -> xr.Dataset:
         month_cos=np.cos(2 * np.pi * month / 12),
     )
 
-    # Climatologia por dia-do-ano, POR CÉLULA, a partir do proxy ERA5 — é a
-    # mesma definição usada por cluster_mlp.py e pelo preprocessor do LSTM.
-    clim = get_climatology(ds, ERA5_GUST_PROXY, slice(*TRAIN_SLICE))
-    ds = ds.assign(era5_clim_wind=clim.sel(dayofyear=doy).drop_vars("dayofyear"))
+    # `era5_clim_wind` NÃO é montada aqui: lazy/mlp e LSTM ajustam a climatologia
+    # por série HARMÔNICA nos dias de treino da sua partição, e `grid_direct_predict`
+    # a calcula por célula a partir do split gravado no artefato.
 
     # `latitude`/`longitude` já são features do modelo (no treino, as da
     # estação). Não precisam ser materializadas como variáveis: depois de
@@ -145,6 +121,21 @@ def assign_cell_clusters(ds_cells: xr.Dataset, shp_dir: str | Path) -> pd.Series
                      name="cluster_id")
 
 
+def new_features_for_cells(ds_cells: xr.Dataset, nf_grid: xr.Dataset | None) -> xr.Dataset:
+    """Features novas (`nf_*`, grade de src/data/new_features.py) nas células
+    da bacia. As duas grades são a mesma (os nós da região são nós do
+    ERA5-Basin), então o nearest é leitura exata do nó; células fora da
+    região ficam NaN e não recebem predição de modelos que usam essas
+    features."""
+    if nf_grid is None:
+        return ds_cells
+    pts = new_features_to_points(
+        nf_grid, ds_cells["latitude"].values, ds_cells["longitude"].values,
+        ds_cells["cell"].values, "cell", ds_cells["time"].values, "nearest",
+    )
+    return ds_cells.assign({v: pts[v] for v in pts.data_vars})
+
+
 def iter_feature_frames(
     ds_cells: xr.Dataset,
     cluster_ids: pd.Series,
@@ -166,10 +157,5 @@ def iter_feature_frames(
         df = sub[feature_vars].to_dataframe().reset_index()
         df["cluster_id"] = df["cell"].map(cluster_ids)
         df["season"] = month_to_season(df["time"].dt.month)
-
-        # Só existem onde há estação medindo — o imputer de cada modelo
-        # preenche (ver docstring do módulo).
-        for col in STATION_ONLY_FEATURES:
-            df[col] = np.nan
 
         yield year, df

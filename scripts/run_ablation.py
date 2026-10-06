@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Matriz de ablation: cluster_mlp em 4 combinações de dados/features.
+"""Matriz de ablation: cluster_mlp em 3 combinações de features.
 
-Roda cluster_mlp.run() isoladamente para cada combinação — original / +
-sintético / + features novas (ERA5-18UTC + BT55) / tudo junto — cada uma em
+Roda cluster_mlp.run() isoladamente para cada combinação — original / + features
+novas (dataset/raw/new_features) / + ERA5-Basin — cada uma em
 seu próprio experimento (plots completos + results.csv + run_meta.json com
-"ablation_group" para filtro no dashboard), e agrega os 4 results.csv num
+"ablation_group" para filtro no dashboard), e agrega os 3 results.csv num
 comparativo lado a lado (estilo scripts/compare_pipelines.py, mas agrupando
 por "experiment" em vez de "pipeline", já que aqui todos os braços são mlp).
 
 Uso:
-    python3 scripts/run_ablation.py --synthetic-csv artifacts/gan_clusters/exp1/synthetic_augment.csv
+    python3 scripts/run_ablation.py
     python3 scripts/run_ablation.py --only original --skip-summary
 """
 from __future__ import annotations
@@ -29,8 +29,6 @@ def main():
     parser.add_argument("--raw-dir", default=str(ROOT / "dataset" / "raw"))
     parser.add_argument("--shp-dir", default=str(ROOT / "dataset" / "shp"))
     parser.add_argument("--output-dir", default=str(ROOT / "artifacts" / "mlp_clusters"))
-    parser.add_argument("--synthetic-csv", default=None,
-                        help="Obrigatório se algum braço selecionado usar dados sintéticos")
     parser.add_argument("--exp-prefix", default="",
                         help="Prefixo opcional pro nome do diretório de experimento "
                              "(default: vazio — diretório fica só com o nome do braço, ex: 'original')")
@@ -39,7 +37,7 @@ def main():
     parser.add_argument("--extreme-power", type=float, default=2.0)
     parser.add_argument("--max-iter", type=int, default=500)
     parser.add_argument("--only", default=None,
-                        help="Rodar só um braço (original|synthetic|newfeatures|all)")
+                        help="Rodar só um braço (original|newfeatures|basin)")
     parser.add_argument("--skip-summary", action="store_true")
     parser.add_argument("--summary-only", action="store_true",
                         help="Só regenera o resumo/plots a partir de experimentos já rodados (não treina nada)")
@@ -56,13 +54,6 @@ def main():
     arm_names = {exp: c["name"] for exp, c in zip(exp_names, combos)}
 
     if not args.summary_only:
-        needs_synth = any(c["use_synthetic"] for c in combos)
-        if needs_synth and not args.synthetic_csv:
-            parser.error(
-                "Um ou mais braços selecionados usam dados sintéticos — informe --synthetic-csv "
-                "(gere com: python3 main.py cluster_gan --exp-name <nome>)."
-            )
-
         from src.pipelines.cluster_mlp import run as run_cluster_mlp
 
         hidden_layers = tuple(int(x) for x in args.hidden_layers.split(","))
@@ -78,7 +69,6 @@ def main():
                 extreme_power=args.extreme_power,
                 max_iter=args.max_iter,
                 cluster_merge=None,
-                synthetic_csv=args.synthetic_csv if combo["use_synthetic"] else None,
                 exp_name=exp_name,
                 feature_groups=combo["feature_groups"],
                 ablation_group=combo["name"],

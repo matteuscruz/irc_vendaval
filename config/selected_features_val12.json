@@ -1,0 +1,48 @@
+{
+ "schema": 1,
+ "tag": "val12",
+ "variables": [
+  "gust",
+  "gust10fg",
+  "hora_solar_sin",
+  "v10",
+  "v100",
+  "w10",
+  "w100",
+  "cape",
+  "mcpr",
+  "grad_mslp",
+  "grad_mslp_hpa_100km",
+  "anor"
+ ],
+ "by_group": {
+  "grupo1": [
+   "gust",
+   "gust10fg",
+   "hora_solar_sin",
+   "v10",
+   "v100",
+   "w10",
+   "w100"
+  ],
+  "grupo2": [
+   "cape",
+   "mcpr"
+  ],
+  "grupo3": [
+   "grad_mslp",
+   "grad_mslp_hpa_100km"
+  ],
+  "grupo4": [
+   "anor"
+  ]
+ },
+ "ablate": [
+  "anor"
+ ],
+ "n_columns": 58,
+ "columns_fp": "c4163d73d77d",
+ "selected_on": "validação (permutação por variável, LightGBM, 4 trimestres)",
+ "rule": "d_rmse médio > piso do ruído (ctrl_noise, maior entre trimestres) e positivo em >= 3 de 4 trimestres",
+ "noise_floor_val": 0.00399
+}

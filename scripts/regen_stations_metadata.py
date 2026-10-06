@@ -38,7 +38,7 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", required=True, help="artifacts/ablation/mlp no repo do dashboard")
     parser.add_argument(
         "--arms", nargs="+",
-        default=["original", "synthetic", "newfeatures", "all", "basin", "all_basin"],
+        default=["original", "newfeatures", "basin"],
     )
     args = parser.parse_args()
 

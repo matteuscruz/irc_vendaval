@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Matriz de ablation: cluster_lazy em 4 combinações de dados/features.
+"""Matriz de ablation: cluster_lazy em 3 combinações de features.
 
-Mesma matriz de scripts/run_ablation.py (original / +sintético / +features
-novas / tudo junto), mas para o pipeline LazyPredict. Cada braço roda todos
+Mesma matriz de scripts/run_ablation.py (original / +features novas /
++ERA5-Basin), mas para o pipeline LazyPredict. Cada braço roda todos
 os clusters (cluster_id=None) numa única chamada local — não usa o fan-out
 por container do Modal (isso é feito pelo wrapper src/modal/cluster_lazy.py
 quando rodado na nuvem).
 
 Uso:
-    python3 scripts/run_ablation_lazy.py --synthetic-csv artifacts/gan_clusters/exp1/synthetic_augment.csv
+    python3 scripts/run_ablation_lazy.py
     python3 scripts/run_ablation_lazy.py --only original --skip-summary
 """
 from __future__ import annotations
@@ -28,19 +28,11 @@ def main():
     parser.add_argument("--raw-dir", default=str(ROOT / "dataset" / "raw"))
     parser.add_argument("--shp-dir", default=str(ROOT / "dataset" / "shp"))
     parser.add_argument("--output-dir", default=str(ROOT / "artifacts" / "lazy_clusters"))
-    parser.add_argument("--synthetic-csv", default=None,
-                        help="Obrigatório se algum braço selecionado usar dados sintéticos")
-    parser.add_argument("--exp-prefix", default="",
-                        help="Prefixo opcional pro nome do diretório de experimento "
-                             "(default: vazio — diretório fica só com o nome do braço, ex: 'original')")
-    parser.add_argument("--synth-n-above", type=int, default=None)
-    parser.add_argument("--synth-n-below", type=int, default=0)
-    parser.add_argument("--extreme-percentile", type=float, default=0.90)
     parser.add_argument("--no-stratify-seasons", action="store_false", dest="stratify_seasons")
     parser.add_argument("--n-neighbor-clusters", type=int, default=1)
     parser.add_argument("--eval-window", choices=["monthly", "biweekly"], default="monthly")
     parser.add_argument("--only", default=None,
-                        help="Rodar só um braço (original|synthetic|newfeatures|all)")
+                        help="Rodar só um braço (original|newfeatures|basin)")
     parser.add_argument("--skip-summary", action="store_true")
     parser.add_argument("--summary-only", action="store_true",
                         help="Só regenera o resumo/plots a partir de experimentos já rodados (não treina nada)")
@@ -57,13 +49,6 @@ def main():
     arm_names = {exp: c["name"] for exp, c in zip(exp_names, combos)}
 
     if not args.summary_only:
-        needs_synth = any(c["use_synthetic"] for c in combos)
-        if needs_synth and not args.synthetic_csv:
-            parser.error(
-                "Um ou mais braços selecionados usam dados sintéticos — informe --synthetic-csv "
-                "(gere com: python3 main.py cluster_gan --exp-name <nome>)."
-            )
-
         from src.pipelines.cluster_lazy import run as run_cluster_lazy
 
         for combo, exp_name in zip(combos, exp_names):
@@ -73,10 +58,6 @@ def main():
                 shp_dir=args.shp_dir,
                 output_dir=str(output_dir),
                 cluster_merge=None,
-                synthetic_csv=args.synthetic_csv if combo["use_synthetic"] else None,
-                synth_n_above=args.synth_n_above,
-                synth_n_below=args.synth_n_below,
-                extreme_percentile=args.extreme_percentile,
                 stratify_seasons=args.stratify_seasons,
                 n_neighbor_clusters=args.n_neighbor_clusters,
                 eval_window=args.eval_window,
