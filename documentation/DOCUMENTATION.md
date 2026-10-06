@@ -14,6 +14,7 @@ e detalhes de implementação.
 - [Pipeline `cluster_lazy`](06_cluster_lazy.md)
 - [Inferência e artefatos](08_inferencia_e_artefatos.md)
 - [Estudo de informação de features](09_estudo_de_features.md)
+- [Contexto, estrutura e histórico](10_contexto_e_historico.md)
 
 ## Como usar esta pasta
 
