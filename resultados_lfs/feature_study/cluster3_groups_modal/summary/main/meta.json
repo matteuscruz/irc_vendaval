@@ -1,0 +1,30 @@
+{
+  "tags": [
+    "full",
+    "full_s43",
+    "full_s44",
+    "full_s45",
+    "full_s46"
+  ],
+  "n_boot": 2000,
+  "reference_models": [
+    "CatBoostRegressor",
+    "LGBMRegressor",
+    "XGBRegressor",
+    "HistGradientBoostingRegressor",
+    "ExtraTreesRegressor",
+    "RandomForestRegressor",
+    "Ridge"
+  ],
+  "sesoi_rel": 0.01,
+  "primary_metric": {
+    "features": "rmse",
+    "loss": "rmse_p90"
+  },
+  "loss_models": [
+    "CatBoostRegressor",
+    "LGBMRegressor",
+    "XGBRegressor"
+  ],
+  "champion_slack": 0.05
+}

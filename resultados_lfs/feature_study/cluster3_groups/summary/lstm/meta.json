@@ -1,0 +1,21 @@
+{
+  "tags": [
+    "full_lstm"
+  ],
+  "n_boot": 2000,
+  "reference_models": [
+    "CatBoostRegressor",
+    "LGBMRegressor",
+    "XGBRegressor",
+    "HistGradientBoostingRegressor",
+    "ExtraTreesRegressor",
+    "RandomForestRegressor",
+    "Ridge"
+  ],
+  "sesoi_rel": 0.01,
+  "primary_metric": {
+    "features": "rmse",
+    "selection": "rmse"
+  },
+  "champion_slack": 0.05
+}

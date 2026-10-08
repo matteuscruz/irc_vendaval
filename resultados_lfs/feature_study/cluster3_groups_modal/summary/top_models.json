@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "arm": "base",
+  "k": 5,
+  "slack": 0.05,
+  "rule": "r2_slack_then_rmse_p90",
+  "split_select": "val",
+  "tags": [
+    "full_triage",
+    "full_s43_triage",
+    "full_s44_triage",
+    "full_s45_triage",
+    "full_s46_triage"
+  ],
+  "models_fp": "5e3b0eaeaeb1",
+  "by_season": {
+    "DJF": [
+      "MLPRegressor",
+      "CatBoostRegressor",
+      "LGBMRegressor",
+      "RandomForestRegressor",
+      "HistGradientBoostingRegressor"
+    ],
+    "JJA": [
+      "CatBoostRegressor",
+      "LinearRegression",
+      "BayesianRidge",
+      "SGDRegressor",
+      "LGBMRegressor"
+    ],
+    "MAM": [
+      "ExtraTreesRegressor",
+      "RandomForestRegressor",
+      "CatBoostRegressor",
+      "MLPRegressor",
+      "BaggingRegressor"
+    ],
+    "SON": [
+      "HistGradientBoostingRegressor",
+      "CatBoostRegressor",
+      "LGBMRegressor",
+      "ExtraTreesRegressor",
+      "RandomForestRegressor"
+    ]
+  }
+}
