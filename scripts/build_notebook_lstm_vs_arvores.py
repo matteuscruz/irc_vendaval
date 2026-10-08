@@ -226,6 +226,76 @@ print("\\nTop 10 do LightGBM:"); print(pd.DataFrame({"LightGBM": top_t20.head(10
 """)
 
 md("""
+## 4. Todos os modelos de ML juntos (execução do Modal: arms `base` e `full`)
+
+Os 10 modelos tabulares do estudo de referência (os 5 melhores de cada trimestre, 5 seeds) e a LSTM treinada no
+Modal (1 seed). Cada modelo só existe nos trimestres em que foi eleito, então **a comparação é por trimestre**:
+em cada um há 5 modelos tabulares e a LSTM. O erro é o RMSE no teste; o efeito é `full` contra `base` por modelo,
+com o mesmo bootstrap pareado em blocos. Gerado por `scripts/analise_todos_modelos.py`.
+""")
+
+py("""
+TODOS = ARV / "todos_os_modelos"
+ps = pd.read_csv(TODOS / "erro_por_modelo_arm_trimestre.csv")
+ef_m = pd.read_csv(TODOS / "efeito_full_vs_base_por_modelo.csv")
+era5_s = ps.drop_duplicates("season").set_index("season").era5_rmse.reindex(SEASONS)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5.6), sharey=True, constrained_layout=True)
+ordem_m = ps[ps.arm == "base"].groupby("model").RMSE.mean().sort_values().index
+for ax, arm in zip(axes, ("base", "full")):
+    pv = ps[ps.arm == arm].pivot_table(index="model", columns="season", values="RMSE").reindex(index=ordem_m, columns=list(SEASONS))
+    pv.loc["ERA5 (rajada bruta)"] = era5_s
+    im = ax.imshow(pv.to_numpy(float), cmap="YlOrRd", aspect="auto", vmin=2.05, vmax=2.95)
+    for i in range(pv.shape[0]):
+        for j in range(pv.shape[1]):
+            v = pv.iloc[i, j]
+            ax.text(j, i, "·" if np.isnan(v) else f"{v:.2f}", ha="center", va="center", fontsize=9,
+                    fontweight="bold" if pv.index[i] == "LSTM" else "normal",
+                    color="white" if (not np.isnan(v) and v > 2.75) else "black")
+    ax.set_xticks(range(4)); ax.set_xticklabels(SEASONS)
+    ax.set_yticks(range(pv.shape[0])); ax.set_yticklabels(pv.index)
+    ax.grid(False); ax.set_title(f"arm {arm}")
+    ax.axhline(pv.shape[0] - 1.5, color="k", lw=1)
+fig.suptitle("Figura 5: RMSE no teste por modelo e trimestre ( · = o modelo não está no top-5 do trimestre)", fontsize=12.5)
+plt.show()
+
+rank = ps.assign(posicao=ps.groupby(["arm", "season"]).RMSE.rank()).query("model == 'LSTM'").pivot_table(
+    index="arm", columns="season", values="posicao")[list(SEASONS)]
+print("posição da LSTM entre os 6 modelos de cada trimestre (1 = melhor):"); print(rank.astype(int).to_string())
+""")
+
+py("""
+cor_f = {"LSTM": "#c44", "boosting": "#2a7ab0", "bagging": "#5aa469", "outros": "#999999"}
+d = ef_m.sort_values("efeito_full_vs_base")
+y = np.arange(len(d))
+fig, ax = plt.subplots(figsize=(10.5, 5), constrained_layout=True)
+for yi, (_, r) in zip(y, d.iterrows()):
+    ax.errorbar(r.efeito_full_vs_base, yi, xerr=[[r.efeito_full_vs_base - r.ci_lo], [r.ci_hi - r.efeito_full_vs_base]],
+                fmt="o", ms=7, color=cor_f[r.familia], capsize=3, lw=2)
+ax.axvspan(-d.sesoi.iloc[0], d.sesoi.iloc[0], color="#ddd", alpha=0.7, zorder=0, label=f"±SESOI ({d.sesoi.iloc[0]:.3f})")
+ax.axvline(0, color="k", lw=0.8)
+ax.set_yticks(y); ax.set_yticklabels(d.model)
+ax.set_xlabel("ganho de RMSE ao passar do base para o full (m/s); positivo = o full é melhor")
+ax.set_title("Figura 6: o que somar os grupos 2–4 faz com cada modelo")
+for f_, c_ in cor_f.items():
+    ax.plot([], [], "o", color=c_, label=f_)
+ax.legend(loc="lower right")
+plt.show()
+print(ef_m[["model", "familia", "efeito_full_vs_base", "ci_lo", "ci_hi", "veredito"]].round(3).to_string(index=False))
+""")
+
+md("""
+**Leitura.** Com o `base` (grupo 1), a **LSTM compete com as melhores árvores**: 1º em MAM (2,09), 2º em SON, 3º em
+JJA, 4º em DJF, sempre a menos de ~0,05 m/s do melhor. Com o `full` ela cai para o **último lugar em 3 de 4
+trimestres**: as duas redes (LSTM −0,285 e MLP −0,243) **perdem** com os grupos extras, as **árvores ficam
+indiferentes** (efeitos entre −0,003 e +0,046) e os **modelos lineares ganham** (BayesianRidge +0,068, regressão
+linear +0,062, as únicas vitórias "acrescenta"). O padrão é de capacidade: modelos que ajustam muitas colunas
+(redes) sobreajustam as colunas inúteis, os que as ignoram (árvores) não se importam, e os lineares, com forte
+regularização implícita, aproveitam um pouco. A LSTM no Modal (T4) reproduz a rodada local (efeito −0,285 contra
+−0,290; RMSE do `base` 2,281 nos dois): o resultado não depende da máquina.
+""")
+
+md("""
 ## Limitações e leitura final
 
 - **Uma seed e hiperparâmetros da pipeline** (96 unidades, janela de 24 h, parada antecipada), sem ajuste para
@@ -235,7 +305,7 @@ md("""
   modelos e, ao mesmo tempo, não acrescentam nada fora da amostra: identificam a estação.
 - **Árvores e LSTM não veem a mesma coisa.** A LSTM tem as 24 h anteriores; ainda assim com o `base` ela só
   empata com as árvores, então o histórico horário não traz ganho mensurável aqui.
-- Para decidir de forma robusta, repetir a LSTM nas 5 seeds (Modal: `--stage fit-lstm`).
+- A seção 4 usa a LSTM do Modal com **uma seed** e só os arms `base` e `full`. Para decidir de forma robusta, repetir a LSTM nas 5 seeds e em todos os arms (Modal: `--stage fit-lstm`).
 """)
 
 nb["cells"] = c

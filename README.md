@@ -144,14 +144,38 @@ Juntar a LSTM aos demais modelos (erro por modelo, arm e trimestre; efeito do `f
 uv run python scripts/analise_todos_modelos.py
 ```
 
-Os resultados são lidos pelos notebooks de `notebooks/feature_study_grupos/atual/`. Para regenerá-los
-a partir dos scripts:
+### Gerar as figuras do paper
+
+As figuras saem dos notebooks de `notebooks/feature_study_grupos/atual/`, que **só leem resultados já
+gravados** (nada é treinado ao plotar). Com os dados do LFS (passo 3) basta:
 
 ```bash
+git lfs pull && python scripts/restaurar_resultados.py          # uma vez
+uv pip install nbformat nbconvert ipykernel                     # uma vez
 uv run python scripts/build_notebook_resultados_finais.py
 uv run jupyter nbconvert --to notebook --execute --inplace \
-    notebooks/feature_study_grupos/atual/resultados_finais_grupos.ipynb
+    notebooks/feature_study_grupos/atual/resultados_finais_grupos.ipynb     # ~3 min
 ```
+
+`resultados_finais_grupos.ipynb` traz as figuras do paper, numeradas no próprio notebook:
+
+| Fig. | mostra |
+|---|---|
+| 1 | efeito de cada grupo (somar/remover) com IC, SESOI e controles |
+| 2 | o mesmo efeito nas métricas de cauda |
+| 3 | SHAP por grupo e trimestre |
+| 4 | desempenho de todos os arms contra o ERA5 |
+| 5 e 5b | calibração, POD e FAR por trimestre (ERA5, melhor ML e LSTM) e exemplos de acertos, perdidos e falsos alarmes |
+| 6 | modelo treinado só com as variáveis selecionadas |
+| 6b | as 58 colunas selecionadas, com nome e importância |
+| 7 | distribuição da rajada por trimestre e por método |
+
+Os outros dois notebooks de `atual/` (`grupos_1_e_4_importancia_por_variavel`, `lstm_vs_arvores`) têm
+geradores próprios (`build_notebook_group_importance.py`, `build_notebook_lstm_vs_arvores.py`) e
+o mesmo `nbconvert`. **Só `resultados_finais_grupos` foi testado a partir do pacote do LFS**; os outros
+dois podem pedir arquivos que não estão em `resultados_lfs/`. Para refazer os resultados do zero
+(treino), use os passos acima desta seção. Para juntar a LSTM aos demais modelos antes de plotar:
+`uv run python scripts/analise_todos_modelos.py`.
 
 Passos de nuvem são pagos: confira o `plan` antes e use `MODAL_PROFILE` como no passo 2.
 

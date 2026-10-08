@@ -85,12 +85,15 @@ image = (
 lstm_image = (
     modal.Image.from_registry("tensorflow/tensorflow:2.16.1-gpu")
     .apt_install("libhdf5-dev", "libnetcdf-dev", "gdal-bin", "libgdal-dev", "libproj-dev")
+    # NumPy < 2: o TensorFlow 2.16.1 da imagem foi compilado contra o NumPy 1.x, e com o 2.x o
+    # import quebra ("numpy.core.umath failed to import" em ml_dtypes). O pino vai nos DOIS
+    # `pip_install`: o segundo (lazypredict/xgboost/lightgbm) não pode reatualizar o NumPy.
     .pip_install(
-        "numpy>=1.24.0", "pandas>=2.0.0", "scikit-learn>=1.6.0", "matplotlib>=3.9.0",
+        "numpy>=1.24.0,<2", "pandas>=2.0.0,<2.3", "scikit-learn>=1.6.0", "matplotlib>=3.9.0",
         "xarray>=2024.1.0", "netCDF4>=1.6.0", "geopandas>=0.14.0", "pyshp>=2.3.0",
         "scipy>=1.10.0", "shapely>=2.0.0", "pyarrow>=14.0.0", "pyyaml>=6.0.3", "pydantic>=2.13.3",
     )
-    .pip_install("lazypredict[boost]>=0.3.0", "xgboost>=2.0.0", "lightgbm>=4.0.0")
+    .pip_install("numpy>=1.24.0,<2", "lazypredict[boost]>=0.3.0", "xgboost>=2.0.0", "lightgbm>=4.0.0")
     .env({"MPLBACKEND": "Agg", "PYTHONUNBUFFERED": "1", "TF_CPP_MIN_LOG_LEVEL": "2"})
     .add_local_file(str(_local_root / "main.py"), remote_path=f"{REMOTE_APP_DIR}/main.py", copy=True)
     .add_local_dir(str(_local_root / "src"), remote_path=f"{REMOTE_APP_DIR}/src", copy=True)

@@ -170,3 +170,19 @@ def test_every_arm_is_evaluated_on_the_same_rows_even_if_one_arm_has_columns_wit
     unit = estudo / "units" / "full_lstm"
     ids = {a.name: set(pd.read_parquet(unit / f"resid__DJF__{a.name}.parquet")["row_id"]) for a in arms}
     assert ids["base"] == ids["full"] and len(ids["base"]) > 0
+
+
+def test_custom_blocks_replace_the_default_columns_and_groups():
+    x_tr, y_tr = _data(500, seed=1)
+    x_va, y_va = _data(120, seed=2)
+    x_te, y_te = _data(300, seed=3)
+    keep: dict = {}
+    wl.fit_arm_lstm(x_tr, y_tr, x_va, y_va, x_te, y_te, np.arange(300), seed=7, model_out=keep, **HP)
+    imp = wl.permutation_importance(keep["predict"], keep["x_val_scaled"], keep["y_val"], ["util", "ruido"], {},
+                                    n_repeats=2, seed=1, blocos={"variavel_util": ["util"], "variavel_ruido": ["ruido"]})
+    assert set(imp["nivel"]) == {"bloco"} and set(imp["nome"]) == {"variavel_util", "variavel_ruido"}
+    m = imp.groupby("nome").d_rmse.mean()
+    assert m["variavel_util"] > 10 * max(m["variavel_ruido"], 1e-3)
+    with pytest.raises(ValueError, match="não estão na entrada"):
+        wl.permutation_importance(keep["predict"], keep["x_val_scaled"], keep["y_val"], ["util", "ruido"], {},
+                                  blocos={"x": ["nao_existe"]})

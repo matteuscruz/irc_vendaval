@@ -1,0 +1,33 @@
+{
+ "schema": 1,
+ "tag": "val12",
+ "nota": "As 12 familias de selected_features_val12.json expandidas nas 58 colunas exatas do arm sel__val12 (as que o modelo treinou). Fonte de cada grupo: dataset/raw/feature_study_cluster_3/features_<grupo>_cluster3.parquet. Sufixos: r75/r250 = vizinhanca de 75/250 km; lag1h, delta3h, max_prev3h, std_prev3h = defasagens horarias; c75_250/l75_250 = contraste e razao entre os dois raios. Ordem dentro da familia: a do arm.",
+ "n_colunas": 58,
+ "colunas_por_familia": {
+  "grupo1": {
+   "gust": ["gust_r250_max", "gust_r250_median", "gust_r250_std", "gust_r75_max", "gust_r75_median", "gust_r75_std"],
+   "gust10fg": ["gust10fg", "gust10fg_delta3h", "gust10fg_lag1h", "gust10fg_max_prev3h", "gust10fg_std_prev3h"],
+   "hora_solar_sin": ["hora_solar_sin"],
+   "v10": ["v10"],
+   "v100": ["v100"],
+   "w10": ["w10", "w10_delta3h", "w10_lag1h", "w10_max_prev3h", "w10_r250_median", "w10_r250_std", "w10_r75_max", "w10_r75_median", "w10_r75_std", "w10_std_prev3h"],
+   "w100": ["w100"]
+  },
+  "grupo2": {
+   "cape": ["cape", "cape_c75_250", "cape_delta3h", "cape_l75_250", "cape_lag1h", "cape_max_prev3h", "cape_r250_median", "cape_r75_max", "cape_r75_median", "cape_r75_std", "cape_std_prev3h"],
+   "mcpr": ["mcpr", "mcpr_delta3h", "mcpr_l75_250", "mcpr_lag1h", "mcpr_max_prev3h", "mcpr_r250_max", "mcpr_r250_median", "mcpr_r75_fracpos", "mcpr_r75_max", "mcpr_r75_std", "mcpr_std_prev3h"]
+  },
+  "grupo3": {
+   "grad_mslp": ["grad_mslp_r250_median"],
+   "grad_mslp_hpa_100km": ["grad_mslp_hpa_100km"]
+  },
+  "grupo4": {
+   "anor": ["anor_ponto", "anor_r250_max", "anor_r250_mean", "anor_r250_min", "anor_r250_std", "anor_r75_max", "anor_r75_mean", "anor_r75_min", "anor_r75_std"]
+  }
+ },
+ "importancia_lstm_media_4_trimestres_top": {
+  "anor_r75_std": 0.144, "mcpr": 0.104, "mcpr_lag1h": 0.100, "mcpr_max_prev3h": 0.078, "mcpr_std_prev3h": 0.046,
+  "mcpr_r250_median": 0.042, "cape_delta3h": 0.037, "mcpr_r75_std": 0.024, "mcpr_r250_max": 0.021, "cape_c75_250": 0.019
+ },
+ "colunas_sem_peso_na_lstm": ["anor_r75_max", "w10_r250_std", "anor_r250_max", "anor_r250_min", "mcpr_delta3h", "anor_r250_std", "mcpr_r75_fracpos", "gust_r250_std", "gust10fg_std_prev3h", "anor_r75_mean", "anor_r250_mean"]
+}

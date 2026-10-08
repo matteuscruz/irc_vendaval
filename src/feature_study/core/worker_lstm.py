@@ -148,14 +148,15 @@ def fit_arm_lstm(x_tr, y_tr, x_va, y_va, x_te, y_te, test_row_ids, *, seed: int 
                 model_out["pred_test"] = np.clip(pred, *CLIP_RANGE).astype("float32")
     if model_out is not None:
         model_out.update(model=model, scaler=sc, y_mean=mu, y_std=sd, test_valid=m_te, predict=predict,
-                         x_test_scaled=x_te_s, y_test=y_te)
+                         x_test_scaled=x_te_s, y_test=y_te, x_val_scaled=x_va_s, y_val=y_va)
 
     resid_df = pd.DataFrame(resid)
     resid_df.insert(0, "row_id", ids)
     return pd.DataFrame(rows), resid_df, time.time() - t0
 
 
-def permutation_importance(predict, x, y, names, group_of, *, n_repeats: int = 3, seed: int = MODEL_SEED) -> pd.DataFrame:
+def permutation_importance(predict, x, y, names, group_of, *, n_repeats: int = 3, seed: int = MODEL_SEED,
+                           blocos: dict[str, list[str]] | None = None) -> pd.DataFrame:
     """Quanto o erro PIORA ao embaralhar cada coluna e cada grupo, na LSTM já ajustada.
 
     `x` é `(n, T, F)` já escalado, `names` os nomes das F colunas na ordem da entrada. Embaralha-se
@@ -165,6 +166,10 @@ def permutation_importance(predict, x, y, names, group_of, *, n_repeats: int = 3
 
     É uso do modelo, não ganho fora da amostra (a mesma ressalva da importância por permutação das
     árvores): serve para comparar COMO a LSTM e as árvores distribuem o peso entre os grupos.
+
+    `blocos` (nome → colunas) troca os blocos padrão (cada coluna e cada grupo) por blocos próprios, como
+    "uma variável = todas as suas colunas" na seleção de variáveis; sai uma linha por (bloco, repetição)
+    com `nivel = "bloco"`.
     """
     from src.feature_study.diagnostics.shap_groups import group_of_column
 
@@ -181,11 +186,18 @@ def permutation_importance(predict, x, y, names, group_of, *, n_repeats: int = 3
     por_grupo: dict[str, list[int]] = {}
     for i, c in enumerate(names):
         por_grupo.setdefault(group_of_column(c, group_of), []).append(i)
-    blocos = [("coluna", c, group_of_column(c, group_of), [i]) for i, c in enumerate(names)]
-    blocos += [("grupo", g, g, cols) for g, cols in por_grupo.items()]
+    if blocos is None:
+        lista = [("coluna", c, group_of_column(c, group_of), [i]) for i, c in enumerate(names)]
+        lista += [("grupo", g, g, cols) for g, cols in por_grupo.items()]
+    else:
+        pos = {c: i for i, c in enumerate(names)}
+        faltam = sorted({c for cols in blocos.values() for c in cols} - set(pos))
+        if faltam:
+            raise ValueError(f"colunas dos blocos que não estão na entrada: {faltam[:5]}")
+        lista = [("bloco", nome, nome, [pos[c] for c in cols]) for nome, cols in blocos.items()]
 
     linhas = []
-    for nivel, nome, grupo, cols in blocos:
+    for nivel, nome, grupo, cols in lista:
         guardado = x[:, :, cols].copy()
         for r in range(n_repeats):
             x[:, :, cols] = guardado[rng.permutation(len(x))]

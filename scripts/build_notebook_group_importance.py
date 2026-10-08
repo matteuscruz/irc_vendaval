@@ -347,67 +347,161 @@ plt.tight_layout(); plt.show()
 """)
 
 md("""
-## 6. Temporal — as séries onde a variável decide
+## 6. O que deixar no dataset: seleção pelo melhor ML e pela LSTM
 
-Para a variável de topo de cada grupo, a previsão do modelo íntegro contra a do mesmo
-modelo com a variável embaralhada, nos 2 episódios de teste em que ela mais mudou a previsão.
-A linha vermelha é a **rajada** do ERA5 (`gust10fg` na hora do pico).
+Cada modelo escolhe as suas variáveis **na validação** (nunca no teste), pela mesma regra: a variável fica se, ao ser
+embaralhada, piora o RMSE acima do piso de uma coluna de ruído **e** em pelo menos 3 dos 4 trimestres.
+
+- **Melhor ML:** o modelo eleito pelo estudo em cada trimestre (o primeiro do `top_models.json`). A seleção dele é a
+  congelada em `config/selected_features_val12.json` (permutação por variável no LightGBM, na validação).
+- **LSTM:** janela de 24 h até a hora do pico, treinada com todas as features mais uma coluna de ruído; a seleção sai
+  da permutação por variável **na validação**, com a mesma regra. Depois treina-se a LSTM só com as selecionadas.
+
+O que os **dois** escolhem é o que se mantém com confiança. O que só um escolhe é candidato. Todos os modelos de cada
+trimestre (ML e LSTM, com todas e com as selecionadas) avaliam as **mesmas linhas** (janela completa para a união
+das colunas; saem só ~15 de 13,6 mil).
 """)
 
 py("""
-rng = np.random.default_rng(42)
-# modelo só com a BASE (sem nenhum grupo), um por trimestre, nas mesmas linhas
-modelos_base = {}
-for s in SEASONS:
-    tr = treino[treino.season == s]
-    modelos_base[s] = LGBMRegressor(random_state=42, verbose=-1, n_jobs=4).fit(tr[BASE_COLS], tr[ALVO])
-modelos_sel = {}
-for s in SEASONS:
-    tr = treino[treino.season == s]
-    modelos_sel[s] = LGBMRegressor(random_state=42, verbose=-1, n_jobs=4).fit(tr[SEL_COLS], tr[ALVO])
-series = {}
-for var in TOP:
-    partes = []
-    for s in SEASONS:
-        x, y, est, te = dados_season[s]
-        p_ok = np.asarray(modelos[s].predict(x), float)
-        emb = x.copy()
-        emb[blocos[var]] = x[blocos[var]].to_numpy()[rng.permutation(len(x))]
-        p_sem = np.asarray(modelos[s].predict(emb), float)
-        p_base = np.asarray(modelos_base[s].predict(te[BASE_COLS]), float)
-        p_sel = np.asarray(modelos_sel[s].predict(te[SEL_COLS]), float)
-        partes.append(te.assign(pred=p_ok, pred_sem=p_sem, pred_base=p_base, pred_sel=p_sel, contrib=np.abs(p_ok - p_sem))
-                      [["estacao", "time", "season", ALVO, REF, "pred", "pred_sem", "pred_base", "pred_sel", "contrib"]])
-    series[var] = pd.concat(partes, ignore_index=True)
+from src.feature_study.diagnostics import dual_models as dm
 
-fig, axes = plt.subplots(4, 2, figsize=(16, 14), constrained_layout=True)
-for lin, var in zip(axes, TOP):
-    for ax, (_, ev) in zip(lin, series[var].nlargest(2, "contrib").iterrows()):
-        g = series[var][(series[var].estacao == ev.estacao) & (series[var].time.between(
-            ev.time - pd.Timedelta(days=10), ev.time + pd.Timedelta(days=10)))].sort_values("time")
-        ax.plot(g.time, g[ALVO], "o-", color="#111", ms=4, lw=1.2, label="observado", zorder=4)
-        ax.plot(g.time, g[REF], "s--", color="#c44", ms=3, lw=1, alpha=0.8, label="ERA5 (rajada)")
-        ax.plot(g.time, g.pred, "^-", color="#2a7ab0", ms=4, lw=1.2, label="modelo")
-        ax.plot(g.time, g.pred_sem, "v:", color="#8a6fb0", ms=4, lw=1.3, label=f"sem {var}")
-        ax.plot(g.time, g.pred_base, "d-.", color="#e08a00", ms=4, lw=1.3, label="só BASE (sem grupos)")
-        ax.plot(g.time, g.pred_sel, "*-", color="#1b9e77", ms=6, lw=1.3, label="seleção (12 var.)")
-        ax.set_title(f"{var} [{grupo_var[var]}] · {ev.estacao} {ev.time:%d/%m/%Y}: contribuição {ev.contrib:.1f} m/s", fontsize=9.5, loc="left")
-        ax.tick_params(axis="x", labelsize=8)
-axes[0, 0].legend(fontsize=8, ncol=3)
-fig.suptitle("Episódios em que a variável de topo de cada grupo decidiu a previsão\\n"
-             "laranja = só a BASE antiga, sem nenhum grupo; verde = seleção de 12 variáveis", fontsize=13)
-plt.show()
+val = pd.read_parquet(DADOS / "sample_full.parquet")
+val = val[val._split == "val"]
+CAMPEAO = {s: json.loads((DADOS.parent / "summary/top_models.json").read_text())["by_season"][s][0] for s in SEASONS}
+print("melhor ML por trimestre (eleito pelo estudo):", CAMPEAO)
 
-fx = pd.cut(series[TOP[0]][ALVO], [0, 8, 12, 16, 100], labels=["< 8", "8–12", "12–16", "> 16 m/s"])
-tab = pd.DataFrame({f"{v} [{grupo_var[v][-1]}]": series[v].groupby(fx, observed=True).contrib.mean() for v in TOP})
-print("contribuição média |Δpredição| (m/s) por faixa da rajada observada:"); print(tab.round(3).to_string())
-sb = series[TOP[0]]
-rm = lambda c: float(np.sqrt(np.mean((sb[c] - sb[ALVO]) ** 2)))  # noqa: E731
-print(f"\\nRMSE no teste: ERA5 {rm(REF):.3f} | só BASE {rm('pred_base'):.3f} | seleção {rm('pred_sel'):.3f} | modelo com grupos {rm('pred'):.3f}")
+BLOCOS_VAR = {**blocos, dm.NOISE: [dm.NOISE]}              # uma variável = todas as suas colunas
+CONJ1 = {"todas": FEATURES, "selecionadas_ML": SEL_COLS, "todas+ruido": FEATURES + [dm.NOISE]}
+predicoes = {s: {} for s in SEASONS}
+imp_lstm_val = {}
+for s in SEASONS:
+    tr, va, te = (d[d.season == s] for d in (treino, val, teste))
+    r = dm.lstm_season_fits(RAIZ / "dataset/raw", picos, tr, va, te, CONJ1, importance_set="todas+ruido",
+                            importance_blocks=BLOCOS_VAR, n_repeats=3)
+    imp_lstm_val[s] = r["importance"]
+    predicoes[s]["LSTM, todas"] = r["pred_test"]["todas"]
+    predicoes[s]["LSTM, seleção do ML"] = r["pred_test"]["selecionadas_ML"]
+    print(f"{s}: LSTM ajustada em 3 conjuntos | linhas sem janela completa: {r['linhas_fora']}")
+sel_lstm = dm.select_by_rule(imp_lstm_val)
+print(f"\\npiso do ruído na validação (LSTM): {sel_lstm.attrs['piso']:.5f} m/s")
+""")
+
+py("""
+vars_ml = list(SEL["variables"])
+vars_lstm = sel_lstm.index[sel_lstm["decisão"] == "manter"].tolist()
+cons = dm.consenso(vars_ml, vars_lstm, sorted(blocos)).assign(grupo=lambda d: d["variável"].map(grupo_var))
+cons = cons.sort_values(["veredito", "grupo", "variável"])
+
+def lista(rotulo):
+    d = cons[cons.veredito == rotulo]
+    return {g: ", ".join(x["variável"]) for g, x in d.groupby("grupo")}
+
+print("=" * 78)
+print(f"MELHOR ML (seleção na validação)  : {len(vars_ml)} variáveis")
+print(f"LSTM       (seleção na validação)  : {len(vars_lstm)} variáveis")
+print("=" * 78)
+for rot, texto in (("ambos", "DEIXAR NO DATASET — escolhidas pelo ML E pela LSTM"),
+                   ("só ML", "CANDIDATAS — só o ML escolheu"),
+                   ("só LSTM", "CANDIDATAS — só a LSTM escolheu"),
+                   ("nenhum", "DESCARTAR — nenhum dos dois escolheu")):
+    d = lista(rot)
+    print(f"\\n{texto}  ({int((cons.veredito == rot).sum())} variáveis)")
+    for g in sorted(d):
+        print(f"   {g}: {d[g]}")
+print("\\ncontagem por veredito e grupo:")
+print(pd.crosstab(cons.grupo, cons.veredito).reindex(columns=["ambos", "só ML", "só LSTM", "nenhum"], fill_value=0).to_string())
+print("\\nLSTM: piora do RMSE na validação por variável (média dos trimestres) e decisão:")
+print(sel_lstm.sort_values("d_rmse", ascending=False).round(4).to_string())
+""")
+
+py("""
+# LSTM só com as variáveis que ELA escolheu (segunda passada, agora que a seleção existe)
+SEL_COLS_LSTM = [c for v in vars_lstm for c in blocos[v]]
+print(f"LSTM selecionadas: {len(vars_lstm)} variáveis, {len(SEL_COLS_LSTM)} colunas")
+for s in SEASONS:
+    tr, va, te = (d[d.season == s] for d in (treino, val, teste))
+    r = dm.lstm_season_fits(RAIZ / "dataset/raw", picos, tr, va, te, {"selecionadas_LSTM": SEL_COLS_LSTM, "todas": FEATURES})
+    predicoes[s]["LSTM, seleção da LSTM"] = r["pred_test"]["selecionadas_LSTM"]
+    predicoes[s]["LSTM, todas"] = r["pred_test"]["todas"]          # mesma linhas dos três
+    # melhor ML (todas e selecionado), mesmos modelos nos dois conjuntos
+    _, predicoes[s]["ML, todas"] = dm.ml_predict(CAMPEAO[s], tr, va, te, FEATURES)
+    _, predicoes[s]["ML, seleção"] = dm.ml_predict(CAMPEAO[s], tr, va, te, SEL_COLS)
+print("ok: 6 conjuntos de previsões por trimestre")
 """)
 
 md("""
-## 7. Cada grupo isolado — qual vale continuar?
+## 7. Séries temporais em três janelas de tempo
+
+As mesmas séries, vistas em **janelas de tempo diferentes** (nada aqui depende de variável): o **INMET** (observado), o
+**ERA5** (rajada), o **melhor ML** e a **LSTM**, cada um com todas as features e com as selecionadas. Uma estação (a de
+mais dias de teste) e, em cada trimestre climático, o dia de maior rajada observada nela:
+
+| coluna | janela |
+|---|---|
+| 1 | **o evento**: 5 dias antes e depois do dia de maior rajada observada |
+| 2 | **o mês de teste completo** desse ano (jan, abr, jul ou out) |
+| 3 | **todos os anos do teste**: o mês de teste de cada ano, em sequência |
+""")
+
+py("""
+NOMES = ["ML, todas", "ML, seleção", "LSTM, todas", "LSTM, seleção da LSTM"]
+partes = []
+for s in SEASONS:
+    te = dados_season[s][3]
+    d = te[["estacao", "time", "season", ALVO, REF]].copy()
+    for n_ in NOMES:
+        d[n_] = predicoes[s][n_].reindex(te.index).to_numpy() if n_.startswith("LSTM") else predicoes[s][n_]
+    partes.append(d)
+serie = pd.concat(partes, ignore_index=True).sort_values(["estacao", "time"])
+ESTACAO = serie.estacao.value_counts().idxmax()
+print(f"estação: {ESTACAO} ({int((serie.estacao == ESTACAO).sum())} dias de teste)")
+
+ESTILO = {"ML, todas": ("^-", "#2a7ab0", "melhor ML, todas"), "ML, seleção": ("*--", "#2a7ab0", "melhor ML, selecionadas"),
+          "LSTM, todas": ("v-", "#1b9e77", "LSTM, todas"), "LSTM, seleção da LSTM": ("D--", "#1b9e77", "LSTM, selecionadas")}
+JANELAS = ["evento (±5 dias)", "mês de teste completo", "todos os anos do teste"]
+
+
+def linhas(ax, g, rotulos=True):
+    ax.plot(g.time, g[ALVO], "o-", color="#111", ms=3.5, lw=1.3, label="INMET (observado)" if rotulos else None, zorder=5)
+    ax.plot(g.time, g[REF], "s--", color="#c44", ms=2.5, lw=0.9, alpha=0.85, label="ERA5 (rajada)" if rotulos else None)
+    for n_, (est_, cor_, rot_) in ESTILO.items():
+        ax.plot(g.time, g[n_], est_, color=cor_, ms=4, lw=1.1, alpha=0.9, label=rot_ if rotulos else None)
+
+
+fig, axes = plt.subplots(4, 3, figsize=(19, 14), constrained_layout=True)
+recorte, tab_rmse = {}, []
+for lin, s in zip(axes, SEASONS):
+    d = serie[(serie.estacao == ESTACAO) & (serie.season == s)]
+    ev = d.loc[d[ALVO].idxmax()]
+    janelas = {
+        JANELAS[0]: d[(d.time - ev.time).abs() <= pd.Timedelta(days=5)],
+        JANELAS[1]: d[(d.time.dt.year == ev.time.year) & (d.time.dt.month == ev.time.month)],
+        JANELAS[2]: d,
+    }
+    for ax, (nome_j, g) in zip(lin, janelas.items()):
+        if nome_j == JANELAS[2]:
+            for k, (_, gy) in enumerate(g.groupby(g.time.dt.year)):      # uma curva por ano: sem ligar anos distintos
+                linhas(ax, gy, rotulos=(k == 0))
+        else:
+            linhas(ax, g)
+        ax.axvline(ev.time, color="#999", lw=0.8, ls=":")
+        ax.set_title(f"{s} · {ESTACAO} · {nome_j} (evento: {ev.time:%d/%m/%Y}, {ev[ALVO]:.1f} m/s)", fontsize=9.5, loc="left")
+        ax.tick_params(axis="x", labelsize=8)
+        comuns_j = g.dropna(subset=NOMES)
+        tab_rmse.append({"trimestre": s, "janela": nome_j, "n dias": len(comuns_j),
+                         **{"ERA5": float(np.sqrt(np.mean((comuns_j[REF] - comuns_j[ALVO]) ** 2))),
+                            **{ESTILO[n_][2]: float(np.sqrt(np.mean((comuns_j[n_] - comuns_j[ALVO]) ** 2))) for n_ in NOMES}}})
+axes[0, 0].legend(fontsize=8, ncol=3, loc="upper left")
+fig.suptitle("INMET, ERA5, melhor ML e LSTM (todas as features e selecionadas) em três janelas de tempo", fontsize=13)
+plt.show()
+
+tab_rmse = pd.DataFrame(tab_rmse)
+print("RMSE (m/s) de cada previsor em cada janela, nos mesmos dias:")
+print(tab_rmse.round(2).to_string(index=False))
+""")
+
+md("""
+## 8. Cada grupo isolado — qual vale continuar?
 
 Aqui o grupo entra **sozinho**: um modelo por trimestre treinado só com as colunas dele
 (e, como referência, a **BASE antiga sozinha**: as 12 variáveis do ERA5 horário por estação,
@@ -481,7 +575,7 @@ ao grupo 1 não acrescenta). O grupo 4 sozinho pode parecer bom por identificar 
 """)
 
 md("""
-## 8. Todas as variáveis: quais manter?
+## 9. Todas as variáveis: quais manter?
 
 Regra, aplicada a cada variável (os números vêm das seções anteriores):
 
@@ -558,9 +652,9 @@ plt.tight_layout(); plt.show()
 """)
 
 md("""
-## 9. Modelo só com as variáveis mantidas
+## 10. Modelo só com as variáveis mantidas
 
-**Cuidado com circularidade.** A seleção da seção 8 usou o conjunto de **teste** (a
+**Cuidado com circularidade.** A seleção da seção 9 usou o conjunto de **teste** (a
 permutação rodou nas linhas de teste). Testar nele um modelo com essas variáveis
 favoreceria a escolha. Por isso a seleção é **refeita na validação** (linhas de validação
 do estudo, que não entram no treino nem no teste, mesma regra e mesmo piso de ruído) e o
@@ -577,7 +671,7 @@ val = treino_total = pd.read_parquet(DADOS / "sample_full.parquet")
 val = val[val._split == "val"]
 print(f"validação: {len(val)} linhas")
 
-# seleção na VALIDAÇÃO: mesma regra da seção 8
+# seleção na VALIDAÇÃO: mesma regra da seção 9
 imp_v, pisos_v = [], []
 for s in SEASONS:
     tr, va = treino[treino.season == s], val[val.season == s]
@@ -596,7 +690,7 @@ mantidas_teste = dec[dec.decisão == "manter"].index.tolist()
 print(f"piso do ruído na validação: {piso_v:.5f} m/s")
 print("seleção refeita aqui == JSON congelado usado nas figuras anteriores:",
       set(mantidas_val) == set(SEL["variables"]))
-print(f"mantidas pela VALIDAÇÃO: {len(mantidas_val)} variáveis | pelo TESTE (seção 8): {len(mantidas_teste)} | "
+print(f"mantidas pela VALIDAÇÃO: {len(mantidas_val)} variáveis | pelo TESTE (seção 9): {len(mantidas_teste)} | "
       f"em comum: {len(set(mantidas_val) & set(mantidas_teste))}")
 print("só na validação:", sorted(set(mantidas_val) - set(mantidas_teste)))
 print("só no teste:    ", sorted(set(mantidas_teste) - set(mantidas_val)))
@@ -669,7 +763,7 @@ diferença entre as duas é o tamanho do viés de selecionar olhando para o test
 """)
 
 md("""
-## 10. O modelo treinado no Modal: seleção contra completo e grupo 1
+## 11. O modelo treinado no Modal: seleção contra completo e grupo 1
 
 Aqui não é mais o LightGBM do notebook: é o **arm `sel__val12` treinado no Modal**, no
 mesmo estudo e com a mesma população dos demais arms. 5 seeds × 4 trimestres × os 5
@@ -766,7 +860,7 @@ fig.suptitle("Modelo treinado no Modal: seleção de 12 variáveis contra comple
 plt.show()
 """)
 
-md("## 11. Veredito por grupo")
+md("## 12. Veredito por grupo")
 
 py("""
 teto = imp[imp.variavel == "CTRL ruído"].d_rmse.mean() if (imp.variavel == "CTRL ruído").any() else 0.0

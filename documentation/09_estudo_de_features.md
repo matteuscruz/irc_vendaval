@@ -215,6 +215,15 @@ features): `sel__val12` vs `full` (o que se perde ao cortar), `sel__val12_sem_an
 `sel__val12` (o que vale o `anor`), `sel_vs_base` (reduzido vs grupo 1). O `aggregate
 --label sel` dá o veredito oficial; o notebook traz uma versão enxuta (sem BH).
 
+**Seleção por ML e por LSTM (consenso).** O notebook `grupos_1_e_4_importancia_por_variavel` (seção 6) aplica a
+mesma regra à LSTM (permutação por variável **na validação**, acima do piso de uma coluna de ruído e positiva em
+>= 3 de 4 trimestres; `diagnostics/dual_models.py`) e compara com a seleção do ML. Resultado: o ML escolhe 12
+variáveis e a LSTM 29; **as 11 que os dois escolhem** são `gust`, `gust10fg`, `hora_solar_sin`, `v10`, `w10`, `w100`
+(grupo 1), `cape`, `mcpr` (grupo 2), `grad_mslp`, `grad_mslp_hpa_100km` (grupo 3) e `anor` (grupo 4); só o ML
+escolhe `v100`; só a LSTM escolhe 18 (entre elas quase todas as estáticas do grupo 4, que identificam a estação);
+21 variáveis ninguém escolhe. No teste (mesmas 13.571 linhas): ERA5 2,658; melhor ML 2,365 com todas e **2,331 com as
+selecionadas**; LSTM 2,578 com todas e 2,590 com as da LSTM (a seleção não ajuda a LSTM).
+
 `data/base_only.py` lê a BASE antiga (12 variáveis do ERA5 horário) na hora do pico, para um modelo
 "sem nenhum grupo" nas mesmas linhas. Resultado: reproduz o ERA5 (RMSE 2,653 contra 2,658).
 
@@ -296,6 +305,30 @@ das 167 colunas têm efeito < 0,002 na LSTM. A comparação robusta é por grupo
 `lstm_vs_arvores`). **Ressalvas:** uma seed, hiperparâmetros da pipeline sem ajuste para este estudo;
 "prejudica" aqui é sobreajuste de uma LSTM sem regularização específica, não prova de que os grupos não tenham
 informação. Para decidir, repetir nas 5 seeds (Modal).
+
+### Todos os modelos de ML juntos (`diagnostics/all_models.py`)
+
+```bash
+python scripts/analise_todos_modelos.py     # lê units/<tag> (tabulares) e units/<tag>_lstm; escreve todos_os_modelos/
+```
+
+Junta os 10 modelos tabulares (os 5 melhores de cada trimestre, 5 seeds) e a LSTM (Modal, 1 seed, arms `base` e
+`full`): erro por modelo × arm × trimestre com o ERA5 ao lado, e o efeito `full` contra `base` **por modelo**, com o
+bootstrap pareado em blocos. Cada modelo só existe nos trimestres em que foi eleito, então a comparação é por
+trimestre (5 tabulares + a LSTM em cada um). A LSTM do Modal reproduz a rodada local (efeito −0,285 contra −0,290;
+RMSE do `base` 2,281 nos dois).
+
+| modelo | RMSE base | RMSE full | efeito do `full` |
+|---|---|---|---|
+| LSTM | 2,281 | 2,570 | **−0,285**, prejudica |
+| MLP | 2,390 | 2,629 | **−0,243**, prejudica |
+| árvores (6 modelos) | 2,19–2,41 | 2,15–2,38 | −0,003 a +0,046, indiferente ou inconclusivo |
+| BayesianRidge, regressão linear | 2,27 | 2,20–2,21 | **+0,068, +0,062**, acrescenta |
+
+Com o `base` a LSTM compete com as melhores árvores (1ª em MAM, 2ª em SON, 3ª em JJA, 4ª em DJF); com o `full` fica
+em último em 3 dos 4 trimestres. As redes (LSTM e MLP) perdem com os grupos extras, as árvores ficam indiferentes e os
+lineares ganham um pouco: é capacidade, não informação. As médias por modelo valem só onde o modelo existe
+(`n_trimestres`); compare por trimestre.
 
 ## Purga temporal nas fronteiras de mês
 

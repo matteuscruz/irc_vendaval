@@ -322,52 +322,173 @@ contraste é inconclusivo (poucos casos). A Figura 5 mostra a calibração e a d
 
 # ── Fig 5 ───────────────────────────────────────────────────────────────────
 md("""
-## 5. O modelo é calibrado? Detecta os extremos?
+## 5. Calibração e detecção de extremos: ERA5, melhor ML e LSTM
 
-**(a) Calibração condicionada na previsão:** o observado médio dentro de faixas dos quantis
-da própria previsão. Um previsor calibrado fica sobre a diagonal. (Condicionar no
-**observado** alto, como no "viés em P90", dá viés negativo até para um previsor perfeito,
-por regressão à média; por isso a pergunta é feita pelo lado da previsão.)
-**(b, c) Detecção de excedência:** POD = fração dos extremos observados que foram previstos;
-FAR = fração dos alarmes que eram falsos, em P90, P95 e P99.
+Cinco previsores nas **mesmas linhas** do teste, por trimestre e no total:
+
+| previsor | o que é |
+|---|---|
+| ERA5 | a rajada bruta do ERA5 |
+| ML, base / selecionadas | o melhor modelo tabular de cada trimestre (o eleito pelo estudo) com o grupo 1 e com as 12 variáveis selecionadas |
+| LSTM, base / selecionadas | a LSTM (janela de 24 h, seed 42) com o grupo 1 e com as mesmas 12 variáveis |
+
+**(a) Calibração condicionada na previsão:** o observado médio dentro de faixas dos quantis da própria previsão; um previsor
+calibrado fica sobre a diagonal. (Condicionar no **observado** alto, como no "viés em P90", dá viés negativo até para um
+previsor perfeito, por regressão à média.) **(b, c) Detecção:** POD = fração dos extremos observados que foram previstos;
+FAR = fração dos alarmes que eram falsos, em P90, P95 e P99 do observado **do próprio escopo**.
 """)
 
 py("""
-fig, ax = plt.subplots(1, 3, figsize=(15, 4.7), constrained_layout=True)
-a = ax[0]
-for nome, g in cal.groupby("previsor"):
-    a.plot(g.prev_media, g.obs_media, "o-", color=COR_P[nome], ms=4, lw=1.8, label=nome)
-lim = [cal.prev_media.min() - 0.5, cal.prev_media.max() + 0.5]
-a.plot(lim, lim, "k--", lw=1, label="calibração perfeita")
-a.set_xlabel("previsão média na faixa (m/s)")
-a.set_ylabel("observado médio na faixa (m/s)")
-a.set_title("(a) Calibração condicionada na previsão")
-a.legend(fontsize=8.5)
-larg = 0.26
-for a, col, tit in ((ax[1], "pod", "(b) POD — extremos observados previstos"), (ax[2], "far", "(c) FAR — alarmes falsos")):
-    xs = np.arange(3)
-    for i, nome in enumerate(COR_P):
-        g = exc[exc.previsor == nome]
-        a.bar(xs + (i - 1) * larg, g[col], larg, color=COR_P[nome], edgecolor="black", linewidth=0.5,
-              label=nome if col == "pod" else None)
-        for x, v in zip(xs + (i - 1) * larg, g[col]):
-            a.text(x, v + 0.008, f"{v:.2f}", ha="center", fontsize=8)
-    a.set_xticks(xs)
-    a.set_xticklabels([f"{r.limiar}\\n({r['valor_m/s']:.1f} m/s)" for _, r in exc[exc.previsor == "ERA5 (rajada bruta)"].iterrows()])
-    a.set_title(tit)
-    a.grid(axis="y", alpha=0.3)
-ax[1].legend(fontsize=8.5)
-fig.suptitle("Figura 5 — O modelo corrige a calibração do ERA5 até P99, mas não detecta mais extremos raros", fontsize=12.5)
+from src.feature_study.diagnostics import predictor_curves as pc
+
+campeao = pc.champions(MODAL / "summary")
+print("melhor ML por trimestre:", campeao)
+prev = pc.load_predictors(MODAL, LOCAL, campeao)
+cal5, exc5 = pc.curves(prev)
+ESC = list(cal5.escopo.unique())
+print(f"{len(prev)} linhas, as mesmas para os 5 previsores | linhas por escopo:", prev.season.value_counts().to_dict())
+
+ESTILO5 = {pc.ERA5: ("#c44", "s--"), "ML, base": ("#6fa8cf", "o-"), "ML, selecionadas": ("#1f5f99", "o--"),
+           "LSTM, base": ("#7fcf9f", "^-"), "LSTM, selecionadas": ("#1b8a5a", "^--")}
+fig, axes = plt.subplots(len(ESC), 3, figsize=(16, 4.3 * len(ESC)), constrained_layout=True)
+for lin, esc in zip(axes, ESC):
+    a = lin[0]
+    for nome, (cor, est) in ESTILO5.items():
+        g = cal5[(cal5.escopo == esc) & (cal5.previsor == nome)]
+        a.plot(g.prev_media, g.obs_media, est, color=cor, ms=3.5, lw=1.5, label=nome)
+    c = cal5[cal5.escopo == esc]
+    lim = [c.prev_media.min() - 0.5, c.prev_media.max() + 0.5]
+    a.plot(lim, lim, "k:", lw=1, label="calibração perfeita")
+    a.set_xlabel("previsão média na faixa (m/s)"); a.set_ylabel(f"{esc}\\nobservado médio (m/s)")
+    a.set_title("calibração" if esc == ESC[0] else "", fontsize=10)
+    for a, col, tit in ((lin[1], "pod", "POD: extremos observados previstos"), (lin[2], "far", "FAR: alarmes falsos")):
+        e = exc5[exc5.escopo == esc]
+        larg = 0.16
+        for i, (nome, (cor, _)) in enumerate(ESTILO5.items()):
+            g = e[e.previsor == nome]
+            xs = np.arange(len(g)) + (i - 2) * larg
+            a.bar(xs, g[col], larg, color=cor, edgecolor="black", linewidth=0.4)
+            for x, v in zip(xs, g[col]):
+                a.text(x, v + 0.01, f"{v:.2f}", ha="center", fontsize=6, rotation=90)
+        ref = e[e.previsor == pc.ERA5]
+        a.set_xticks(np.arange(len(ref)))
+        a.set_xticklabels([f"{r.limiar}\\n({r['valor_m/s']:.1f} m/s)" for _, r in ref.iterrows()], fontsize=8.5)
+        a.set_ylim(0, max(0.75, float(e[col].max()) * 1.15))
+        a.set_title(tit if esc == ESC[0] else "", fontsize=10)
+        a.grid(axis="y", alpha=0.3)
+h, l = axes[0, 0].get_legend_handles_labels()
+fig.legend(h, l, loc="lower center", ncol=6, fontsize=9, frameon=False, bbox_to_anchor=(0.5, -0.012))
+fig.suptitle("Figura 5: calibração e detecção de extremos: ERA5, melhor ML e LSTM (base e variáveis selecionadas)", fontsize=12.5)
 plt.show()
+
+rm5 = {esc: {p: float(np.sqrt(np.mean((d[p] - d["y"]) ** 2))) for p in pc.PREVISORES} for esc, d in pc.scopes(prev).items()}
+print("RMSE no teste (m/s):"); print(pd.DataFrame(rm5).T.round(3).to_string())
+print("\\nPOD e FAR, todos os trimestres:")
+print(exc5[exc5.escopo == pc.TODOS].pivot_table(index="limiar", columns="previsor", values=["pod", "far"])
+      .round(2).reindex(columns=list(pc.PREVISORES), level=1).to_string())
 """)
 
 md("""
-**Leitura.** O ERA5 **superestima** a cauda (a curva vermelha fica abaixo da diagonal: na faixa acima de P99 prevê 21,6 m/s e o observado médio é
-18,8), e o modelo fica **sobre a diagonal** até P99 (desvio ≤ 0,3 m/s). Na faixa acima de P99 ele ainda
-superestima ≈ 1,0 m/s (20,3 contra 19,3): reduz o erro do ERA5 (2,9) sem eliminá-lo. Mas calibrado não quer dizer que detecta: o **POD de P99 é 0,10 no modelo
-contra 0,15 no ERA5** — um previsor suavizado raramente cruza um limiar alto. O ganho está
-em **menos alarmes falsos** (FAR em P90: 0,30 contra 0,42; P99: 0,44 contra 0,62) e em calibração, não em
-capturar os extremos mais raros.
+**Leitura.**
+- **Calibração.** O ERA5 **superestima** a cauda em todos os trimestres: na faixa acima de P99 o observado médio fica 2,0 a
+  3,2 m/s abaixo do previsto. O melhor ML e a LSTM ficam bem mais perto da diagonal (desvios dentro de ±1,7 m/s no topo);
+  o ML tende a superestimar um pouco (−0,8 no total) e a LSTM a subestimar (+0,6 com o `base`).
+- **Detecção.** **Nenhum dos quatro modelos detecta mais extremos raros que o ERA5**: o POD de P99 é 0,14 no ERA5, 0,05 a 0,07
+  no ML e **0,01 na LSTM**, que quase nunca cruza um limiar alto. Em P90 e P95 o ML iguala o ERA5 (0,47 e 0,31). O ganho de
+  todos está em **menos alarmes falsos**: FAR de P90 de 0,41 no ERA5 para 0,30 no ML e 0,24 na LSTM com o `base`.
+- **Variáveis selecionadas.** Para o ML não mudam nada (RMSE 2,316 contra 2,293; POD e FAR praticamente iguais). Para a LSTM
+  pioram (RMSE 2,405 contra 2,287, e menos detecção), em linha com a Figura 6 e com o notebook de importância.
+- **Por trimestre** o quadro varia. Em **DJF** o ML detecta mais que o ERA5 em P90 e P95 (0,35 a 0,39 contra 0,26 em P90). Em
+  **JJA** o ERA5 detecta mais em todos os limiares (0,61 contra 0,51 do ML em P90). Em **MAM** os quatro modelos ficam perto do
+  ERA5 e a LSTM chega a 0,24 em P99. Na calibração do topo, a LSTM **subestima** em SON e JJA (o observado médio fica 1,0 a
+  1,5 m/s acima do previsto) e superestima em MAM; o ML erra menos nos três (abaixo de 0,8 m/s), exceto em DJF, onde
+  superestima 1,2 a 1,7 m/s. Em P99 há só ~34 casos por trimestre: POD e FAR dali oscilam muito (o FAR de 1,00 do ML em JJA
+  vem de pouquíssimos alarmes), e uma seed na LSTM com um modelo por trimestre no ML não permite concluir diferenças pequenas.
+""")
+
+# ── Fig 5b: exemplos de acerto, extremo perdido e falso alarme ─────────────
+md("""
+### Como POD e FAR contam: exemplos reais
+
+Para um limiar (aqui o **P95 do observado**, calculado em todos os trimestres), cada dia cai em uma de quatro casas:
+
+| casa | observado ≥ limiar | previsto ≥ limiar | entra em |
+|---|---|---|---|
+| **acerto** (extremo capturado) | sim | sim | numerador do POD e do FAR (como acerto) |
+| **extremo perdido** | sim | não | só no denominador do POD |
+| **falso alarme** | não | sim | numerador do FAR |
+| correto sem extremo | não | não | não entra em nenhum |
+
+**POD = acertos ÷ (acertos + perdidos)**: dos extremos que aconteceram, quantos o previsor avisou. **FAR = falsos alarmes ÷
+(acertos + falsos alarmes)**: dos avisos que ele deu, quantos eram falsos. O gráfico mostra os dias de teste de cada previsor
+nessas casas; abaixo, séries de dias reais de cada tipo.
+""")
+
+py("""
+tm = pd.read_parquet(MODAL / "data/test.parquet", columns=["row_id", "estacao", "time"])
+pv = prev.merge(tm, on="row_id").sort_values(["estacao", "time"]).reset_index(drop=True)
+LIM = float(np.quantile(pv["y"], 0.95))
+EXEMPLO = ["ERA5", "ML, selecionadas", "LSTM, selecionadas"]
+
+
+def casas(y, pred, lim):
+    obs, prv = y >= lim, pred >= lim
+    return np.select([obs & prv, obs & ~prv, ~obs & prv], ["acerto", "perdido", "falso alarme"], "correto sem extremo")
+
+
+COR_CASA = {"acerto": "#1b9e77", "perdido": "#e08a00", "falso alarme": "#c44", "correto sem extremo": "#cfcfcf"}
+fig, axes = plt.subplots(1, 3, figsize=(16, 5.3), sharex=True, sharey=True, constrained_layout=True)
+for ax, nome in zip(axes, EXEMPLO):
+    cs = casas(pv["y"].to_numpy(), pv[nome].to_numpy(), LIM)
+    for casa in ("correto sem extremo", "perdido", "falso alarme", "acerto"):
+        m = cs == casa
+        ax.scatter(pv.loc[m, "y"], pv.loc[m, nome], s=7 if casa == "correto sem extremo" else 14,
+                   color=COR_CASA[casa], alpha=0.35 if casa == "correto sem extremo" else 0.85, label=f"{casa} ({m.sum()})", zorder=3)
+    ax.axvline(LIM, color="k", ls=":", lw=1); ax.axhline(LIM, color="k", ls=":", lw=1)
+    ax.plot([0, 40], [0, 40], color="#999", lw=0.8)
+    a_, p_, f_ = (int((cs == k).sum()) for k in ("acerto", "perdido", "falso alarme"))
+    ax.set_title(f"{nome}\\nPOD = {a_}/{a_ + p_} = {a_ / (a_ + p_):.0%}   ·   FAR = {f_}/{a_ + f_} = {f_ / (a_ + f_):.0%}", fontsize=10)
+    ax.set_xlabel("observado, INMET (m/s)"); ax.legend(fontsize=8, loc="upper left")
+axes[0].set_ylabel("previsto (m/s)")
+axes[0].set_xlim(0, 36); axes[0].set_ylim(0, 36)
+fig.suptitle(f"Figura 5b: cada dia de teste contado como acerto, extremo perdido ou falso alarme (limiar P95 = {LIM:.1f} m/s)", fontsize=12.5)
+plt.show()
+""")
+
+py("""
+import matplotlib.dates as mdates
+
+PREV_EX = "ML, selecionadas"
+pv["casa"] = casas(pv["y"].to_numpy(), pv[PREV_EX].to_numpy(), LIM)
+acertos = pv[pv.casa == "acerto"].nlargest(2, "y")
+perdidos = pv[pv.casa == "perdido"].nlargest(2, "y")
+falsos = pv[pv.casa == "falso alarme"].assign(excesso=lambda d: d[PREV_EX] - d["y"]).nlargest(2, "excesso")
+exemplos = pd.concat([acertos.assign(tipo="acerto"), perdidos.assign(tipo="extremo perdido"),
+                      falsos.assign(tipo="falso alarme")])
+
+fig, axes = plt.subplots(2, 3, figsize=(17, 7.2), constrained_layout=True)
+for col, tipo in enumerate(("acerto", "extremo perdido", "falso alarme")):
+    for lin, (_, ev) in enumerate(exemplos[exemplos.tipo == tipo].iterrows()):
+        ax = axes[lin, col]
+        g = pv[(pv.estacao == ev.estacao) & ((pv.time - ev.time).abs() <= pd.Timedelta(days=5))]
+        ax.plot(g.time, g["y"], "o-", color="#111", ms=4, lw=1.3, label="INMET (observado)", zorder=5)
+        ax.plot(g.time, g["ERA5"], "s--", color="#c44", ms=3, lw=1, alpha=0.85, label="ERA5")
+        ax.plot(g.time, g[PREV_EX], "^-", color="#1f5f99", ms=4, lw=1.3, label=PREV_EX)
+        ax.axhline(LIM, color="k", ls=":", lw=1, label=f"limiar P95 ({LIM:.1f})")
+        ax.scatter([ev.time], [ev["y"]], s=170, facecolors="none", edgecolors=COR_CASA[ev.casa], linewidths=2.2, zorder=6)
+        ax.scatter([ev.time], [ev[PREV_EX]], s=170, facecolors="none", edgecolors=COR_CASA[ev.casa], linewidths=2.2, zorder=6)
+        ax.set_title(f"{tipo}: {ev.estacao}, {ev.time:%d/%m/%Y}\\nobservado {ev['y']:.1f} · previsto {ev[PREV_EX]:.1f} m/s", fontsize=9.5, loc="left")
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+        ax.tick_params(axis="x", labelsize=8.5)
+axes[0, 0].legend(fontsize=8, loc="upper left")
+fig.suptitle(f"Exemplos de dias contados pelo previsor «{PREV_EX}» (círculo = o dia contado)", fontsize=12.5)
+plt.show()
+
+tab_ex = exemplos[["tipo", "estacao", "time", "y", "ERA5", "ML, selecionadas", "LSTM, selecionadas"]].rename(
+    columns={"y": "observado", "time": "dia"})
+print(f"limiar P95 = {LIM:.2f} m/s | previsor dos exemplos: {PREV_EX}")
+print(tab_ex.round(1).to_string(index=False))
 """)
 
 # ── Fig 6 ───────────────────────────────────────────────────────────────────
@@ -475,6 +596,92 @@ O estimador é uma reimplementação enxuta do `compute_effects` (sem correção
 hipóteses); os números de conferência batem com o estudo (completo − grupo 1 = 0,005;
 ERA5 → grupo 1 = 0,335). A escolha das variáveis está em
 `config/selected_features_val12.json`.
+""")
+
+md("""
+### Colunas exatas do modelo com as variáveis selecionadas (`sel__val12`)
+
+A seleção foi por família (12 nomes), mas o modelo treina com **58 colunas** — cada família traz as suas
+variantes (raio, estatística, defasagem). Abaixo, cada coluna com o nome completo, colorida pelo grupo,
+com a importância média da LSTM por permutação (Δ RMSE em m/s; perto de zero = a coluna não pesa).
+""")
+
+py("""
+sel = json.load(open(RAIZ / "config/selected_features_val12.json"))
+arm_sel = next(a for a in json.load(open(LOCAL / "data/arms.json")) if a["name"] == "sel__val12")
+colunas = arm_sel.get("features") or arm_sel.get("columns")
+grupo_de = {v: g for g, vs in sel["by_group"].items() for v in vs}
+fam = lambda c: max((v for v in grupo_de if c == v or c.startswith(v + "_")), key=len)
+imp6 = pd.concat([pd.read_parquet(LOCAL / f"units/full_lstm/importance__{s_}__full.parquet") for s_ in ["DJF", "MAM", "JJA", "SON"]])
+imp6 = imp6[imp6.nivel == "coluna"].groupby("nome").d_rmse.mean().reindex(colunas)
+tab = pd.DataFrame({"coluna": colunas, "familia": [fam(c) for c in colunas], "grupo": [grupo_de[fam(c)] for c in colunas],
+                    "importancia_lstm": imp6.values}).sort_values("importancia_lstm")
+fig, ax = plt.subplots(figsize=(9, 0.23 * len(tab) + 1.5))
+ax.barh(tab.coluna, tab.importancia_lstm, color=[COR_G[g] for g in tab.grupo])
+ax.axvline(0, color="k", lw=0.6)
+ax.set_xlabel("Δ RMSE ao permutar a coluna (m/s), média dos 4 trimestres")
+ax.set_title(f"As {len(tab)} colunas do modelo com variáveis selecionadas")
+ax.tick_params(axis="y", labelsize=7)
+ax.legend(handles=[plt.Rectangle((0, 0), 1, 1, color=COR_G[g]) for g in ("grupo1", "grupo2", "grupo3", "grupo4")],
+          labels=["grupo 1", "grupo 2", "grupo 3", "grupo 4"], loc="lower right")
+plt.tight_layout(); plt.show()
+for f_, d in tab.groupby("familia", sort=False):
+    print(f"{f_} ({len(d)}): " + ", ".join(d.sort_values("importancia_lstm", ascending=False).coluna))
+""")
+
+md("""
+## 7. Distribuição da rajada por trimestre e por método
+
+Rajada máxima **diária** (média entre as estações de cada dia) no teste, por trimestre climático. Só
+resíduos já gravados: nada foi treinado para esta figura. **Grupos II, III e IV** aparecem como
+*grupo I + grupo* (arms `add_grp__*`): o "grupo isolado" (só as colunas de um grupo) nunca foi
+gravado. Linha inferior: as 5 colunas mais importantes da LSTM (permutação) por trimestre; a
+importância dos modelos de ML não foi persistida.
+""")
+
+py("""
+from src.feature_study.diagnostics import seasonal_distribution as sd
+
+MLA = {"ML, grupo I (base)": "base", "ML, +grupo II": "add_grp__grupo2", "ML, +grupo III": "add_grp__grupo3",
+       "ML, +grupo IV": "add_grp__grupo4", "ML, selecionadas": "sel__val12"}
+LSA = {"LSTM, base": "base", "LSTM, selecionadas": "sel__val12"}
+campeao7 = pc.champions(MODAL / "summary")
+dist = sd.load_series(MODAL, LOCAL, campeao7, MLA, LSA)
+COLS = [sd.INMET, sd.ERA5, *MLA, *LSA]
+diaria = sd.daily_station_mean(dist, COLS)
+COR7 = {sd.INMET: "#111111", sd.ERA5: "#c44", "ML, grupo I (base)": COR_G["grupo1"], "ML, +grupo II": COR_G["grupo2"],
+        "ML, +grupo III": COR_G["grupo3"], "ML, +grupo IV": COR_G["grupo4"], "ML, selecionadas": "#1f3f66",
+        "LSTM, base": "#4cb8c4", "LSTM, selecionadas": "#17808a"}
+ROT7 = {sd.INMET: "INMET", sd.ERA5: "ERA5", "ML, grupo I (base)": "ML\\nI", "ML, +grupo II": "ML\\n+II",
+        "ML, +grupo III": "ML\\n+III", "ML, +grupo IV": "ML\\n+IV", "ML, selecionadas": "ML\\nsel.",
+        "LSTM, base": "LSTM\\nbase", "LSTM, selecionadas": "LSTM\\nsel."}
+imp = pd.concat([pd.read_parquet(LOCAL / f"units/full_lstm/importance__{s}__full.parquet") for s in sd.SEASONS])
+imp = imp[imp.nivel == "coluna"]
+
+fig = plt.figure(figsize=(20, 9.5))
+gs = fig.add_gridspec(2, 4, height_ratios=[1.5, 1], hspace=0.45, wspace=0.95)
+for j, s in enumerate(sd.SEASONS):
+    ax = fig.add_subplot(gs[0, j])
+    d = diaria[diaria.season == s]
+    bp = ax.boxplot([d[c].dropna() for c in COLS], patch_artist=True, widths=0.65, showfliers=False,
+                    medianprops=dict(color="white", lw=1.6))
+    for b, c in zip(bp["boxes"], COLS):
+        b.set(facecolor=COR7[c], alpha=0.85, edgecolor="none")
+    ax.set_xticks(range(1, len(COLS) + 1)); ax.set_xticklabels([ROT7[c] for c in COLS], fontsize=7)
+    ax.set_title(f"{s}  (n = {len(d)} dias)", fontweight="bold"); ax.set_ylabel("rajada diária média (m/s)" if j == 0 else "")
+    ax.axhline(d[sd.INMET].median(), color="#111", lw=0.8, ls=":")
+    t = (imp[imp.season == s].groupby(["nome", "grupo"]).d_rmse.mean().reset_index()
+         .nlargest(5, "d_rmse").iloc[::-1])
+    ax2 = fig.add_subplot(gs[1, j])
+    ax2.barh(t.nome, t.d_rmse, color=[COR_G.get(g, "#999") for g in t.grupo])
+    ax2.set_title(f"top-5 colunas da LSTM — {s}", fontsize=9); ax2.set_xlabel("Δ RMSE ao permutar (m/s)")
+fig.suptitle("Distribuição da rajada diária por trimestre climático e por método (teste, média entre estações)", y=0.96, fontsize=13)
+plt.show()
+
+est7 = sd.summary(diaria, COLS)
+print(est7.pivot_table(index="metodo", columns="escopo", values="mediana").reindex(COLS)[["Todos", *sd.SEASONS]].round(2).to_string())
+print("\\nP90:")
+print(est7.pivot_table(index="metodo", columns="escopo", values="p90").reindex(COLS)[["Todos", *sd.SEASONS]].round(2).to_string())
 """)
 
 md("""
