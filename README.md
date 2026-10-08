@@ -24,6 +24,22 @@ volumes na própria linha do comando: `MODAL_PROFILE=<perfil> modal run ...`.
 
 ## 3. Colocar os dados
 
+**Atalho (Git LFS):** os dados essenciais e os resultados do estudo de features estão na branch
+`dados/lfs-essenciais`. Com isso dá para **replotar as figuras sem treinar nada** (e sem os dados
+brutos do ERA5):
+
+```bash
+git lfs install && git lfs pull                       # baixa ~2,6 GB (dados) + ~90 MB (resultados)
+python scripts/restaurar_resultados.py                # resultados_lfs/ -> artifacts/feature_study/
+uv run python scripts/build_notebook_resultados_finais.py
+uv run jupyter nbconvert --to notebook --execute --inplace \
+    notebooks/feature_study_grupos/atual/resultados_finais_grupos.ipynb
+```
+
+Para **retreinar** (não só replotar), copie também `dataset_lfs/{raw,shp}` para `dataset/`
+(ver `dataset_lfs/README.md`). O `ERA5_Features_Basin_2000_2026.nc` (6 GB) não está no LFS.
+Detalhes manuais, arquivo a arquivo:
+
 ```
 dataset/
 ├── raw/
@@ -120,6 +136,12 @@ uv run python scripts/run_feature_study_local.py run --stage aggregate-lstm --se
 # Modal (GPU): piloto com 2 arms antes das 5 seeds
 modal run src/modal/feature_study.py --stage fit-lstm --study <nome> --seeds 42 --arms base,full
 modal run src/modal/feature_study.py --stage aggregate --lstm --study <nome>
+```
+
+Juntar a LSTM aos demais modelos (erro por modelo, arm e trimestre; efeito do `full` por modelo):
+
+```bash
+uv run python scripts/analise_todos_modelos.py
 ```
 
 Os resultados são lidos pelos notebooks de `notebooks/feature_study_grupos/atual/`. Para regenerá-los

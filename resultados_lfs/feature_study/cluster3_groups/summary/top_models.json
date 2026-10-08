@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "arm": "base",
+  "k": 5,
+  "slack": 0.05,
+  "rule": "r2_slack_then_rmse_p90",
+  "split_select": "val",
+  "tags": [
+    "full_triage"
+  ],
+  "models_fp": "f1b060dfbc1f",
+  "by_season": {
+    "DJF": [
+      "MLPRegressor",
+      "RandomForestRegressor",
+      "LGBMRegressor",
+      "HistGradientBoostingRegressor",
+      "ExtraTreesRegressor"
+    ],
+    "JJA": [
+      "CatBoostRegressor",
+      "LinearRegression",
+      "BayesianRidge",
+      "HistGradientBoostingRegressor",
+      "LGBMRegressor"
+    ],
+    "MAM": [
+      "MLPRegressor",
+      "ExtraTreesRegressor",
+      "CatBoostRegressor",
+      "RandomForestRegressor",
+      "HistGradientBoostingRegressor"
+    ],
+    "SON": [
+      "CatBoostRegressor",
+      "LGBMRegressor",
+      "ExtraTreesRegressor",
+      "HistGradientBoostingRegressor",
+      "GradientBoostingRegressor"
+    ]
+  }
+}
