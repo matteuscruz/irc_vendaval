@@ -415,16 +415,19 @@ def etapa_compilar(dados):
     # 05 / 06: predições e métricas dos arms no teste (estudo de referência, 5 seeds)
     teste = pd.read_parquet(ESTUDO_M / "data/test.parquet")
     lin = linhas(teste.assign(_split="test")).set_index("row_id")
-    arms_p = ("base", "sel__val12", "full", "drop_grp__grupo1", "add_grp__grupo2",
+    arms_p = ("base", "sel__val12", "sel__val12_sem_anor", "full", "drop_grp__grupo1", "add_grp__grupo2",
               "add_grp__grupo3", "add_grp__grupo4", "ctrl__noise", "ctrl__perm_static")
+    # árvores: estudo de referência no Modal (top-5 congelado, 5 seeds);
+    # LSTM: `units/full_lstm` local (seed 42) — o único com os 11 arms + sel__val12 e sel__val12_sem_anor
+    fontes = [(p, "arvores_top5_modal") for p in sorted((ESTUDO_M / "units").iterdir())
+              if not p.name.endswith("_triage") and "lstm" not in p.name]
+    fontes.append((ESTUDO / "units/full_lstm", "lstm_seed42"))
     preds, mets = [], []
-    for pasta in sorted((ESTUDO_M / "units").iterdir()):
+    for pasta, origem in fontes:
         tag = pasta.name
-        if tag.endswith("_triage") or "lstm" in tag:
-            continue
-        seed = 42 if tag == "full" else int(tag.split("_s")[-1])
+        seed = 42 if tag in ("full", "full_lstm") else int(tag.split("_s")[-1])
         for f in pasta.glob("metrics__*.parquet"):
-            mets.append(pd.read_parquet(f).assign(model_seed=seed))
+            mets.append(pd.read_parquet(f).assign(model_seed=seed, origem=origem))
         for f in pasta.glob("resid__*.parquet"):
             _, s, arm = f.stem.split("__", 2)
             if arm not in arms_p:
@@ -432,18 +435,18 @@ def etapa_compilar(dados):
             r = pd.read_parquet(f)
             y = lin.loc[r.row_id, "y_true"].to_numpy()
             for m in r.columns[1:]:
-                preds.append(pd.DataFrame({"arm": arm, "season": s, "model": m, "model_seed": seed,
-                                           "row_id": r.row_id.to_numpy(),
+                preds.append(pd.DataFrame({"origem": origem, "arm": arm, "season": s, "model": m,
+                                           "model_seed": seed, "row_id": r.row_id.to_numpy(),
                                            "y_pred": (r[m].to_numpy() + y).astype("float32")}))
     pr = pd.concat(preds, ignore_index=True)
     pr = pr.merge(lin[["estacao", "time", "year", "month", "latitude", "longitude", "y_true",
                        "era5_gust_max"]].reset_index(), on="row_id", how="left")
-    for c in ("arm", "season", "model"):
+    for c in ("origem", "arm", "season", "model"):
         pr[c] = pr[c].astype("category")
     pr.to_parquet(SAIDA / "05_comparacao_arms_teste.parquet", **PARQ)
 
     me = pd.concat(mets, ignore_index=True)
-    keep = ["arm", "season", "tag", "model", "model_seed", "split", "n", "R2", "RMSE", "Bias",
+    keep = ["origem", "arm", "season", "tag", "model", "model_seed", "split", "n", "R2", "RMSE", "Bias",
             "Bias_P90", "RMSE_P90", "n_nonfinite"]
     me[keep].to_parquet(SAIDA / "06_metricas_arms.parquet", **PARQ)
 
@@ -455,9 +458,9 @@ def etapa_compilar(dados):
 
     # conferência: RMSE refeito das predições == RMSE gravado (antes do truncamento pode diferir
     # só em modelos degenerados)
-    chk = pr.groupby(["arm", "season", "model", "model_seed"], observed=True).apply(
+    chk = pr.groupby(["origem", "arm", "season", "model", "model_seed"], observed=True).apply(
         lambda d: rmse(d.y_true, d.y_pred)).rename("rmse_pred").reset_index()
-    chk = chk.merge(me[me.split == "test"], on=["arm", "season", "model", "model_seed"])
+    chk = chk.merge(me[me.split == "test"], on=["origem", "arm", "season", "model", "model_seed"])
     print(f"[compilar] |RMSE(preds) − RMSE(metrics)| máx = {(chk.rmse_pred - chk.RMSE).abs().max():.2e}")
     print(f"[compilar] {len(pr):,} predições de arms, {len(me):,} linhas de métricas")
 

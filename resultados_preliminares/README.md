@@ -184,7 +184,40 @@ As 12 variáveis viraram o arm `sel__val12`, treinado com o mesmo top-5 e as 5 s
 O corte custa ~0,002 m/s em relação ao `full` e não supera o grupo 1 de forma relevante. **O ganho é a
 parcimônia: 58 colunas contra 167**, com a mesma qualidade e ~13 % melhor que o ERA5 (2,658).
 
-## 5. Ressalvas
+**Na LSTM (seed 42, `units/full_lstm`) o quadro é outro:**
+
+| arm | RMSE no teste (LSTM) |
+|---|---|
+| `base` | 2,281 |
+| `sel__val12` | 2,400 |
+| `sel__val12_sem_anor` | 2,457 |
+| `full` | 2,575 |
+
+- A seleção melhora muito em relação ao `full`, mas fica **0,12 m/s pior que o grupo 1 sozinho**.
+- Tirar o `anor` piora ainda mais.
+
+A seleção foi feita com LightGBM e vale para as árvores. Na LSTM, o melhor continua sendo o `base`.
+Ambos estão em `05_*`/`06_*`, separados pela coluna `origem`.
+
+## 5. O que foi conferido contra o estado atual
+
+| item | conferência | resultado |
+|---|---|---|
+| Variáveis | impressão digital das 58 colunas de `config/selected_features_val12.json` vs. o `features_fp` gravado nas unidades `sel__val12` (Modal, 5 seeds; LSTM) | idênticas (`c4163d73d77d` / `35cd4c864465`) |
+| Seleção | permutação refeita na validação | mesmo piso (0,00399) e mesmas 12 variáveis |
+| Modelos (árvores) | top-5 congelado do estudo de referência no Modal (`cluster3_groups_modal/summary/top_models.json`, 10 modelos distintos) | é o conjunto vigente segundo `documentation/09` |
+| Predições/métricas dos arms | RMSE refeito a partir dos resíduos vs. `metrics__*` | diferença < 1e-7 |
+| Grupo 1 sozinho vs. `base` | reajuste local | exato nos modelos determinísticos; ≤ 0,015 m/s nos demais (ambiente) |
+
+**Fora do escopo destes arquivos:**
+
+- As pipelines de produção (`cluster_lazy`, `cluster_mlp`, `cluster_lstm`) ainda **não** usam a seleção
+  `val12`. O `best_model_selector` segue escolhendo por R².
+- A réplica local das árvores (`cluster3_groups/units/full`, com top-5 de uma triagem local diferente) não
+  entra aqui. A referência é o estudo do Modal.
+- O modelo usado no teste Cluster 3 → 12 (seção 7) não foi conferido, porque está no Modal.
+
+## 6. Ressalvas
 
 - A permutação **divide o crédito entre variáveis colineares** (`w10`, `gust`, `gust10fg`) e mede uso, não ganho
   fora da amostra.
@@ -192,7 +225,7 @@ parcimônia: 58 colunas contra 167**, com a mesma qualidade e ~13 % melhor que o
   (97 blocos) tem IC confiável.
 - A permutação usa uma seed (o LightGBM padrão é determinístico). O estudo por grupos usa 5.
 
-## 6. Cluster 3 → Cluster 12 (`07_*`) — pendente
+## 7. Cluster 3 → Cluster 12 (`07_*`) — pendente
 
 O modelo treinado no Cluster 3 e testado no Cluster 12 está no volume do Modal, ao qual a sessão que gerou
 estes arquivos não tinha acesso. Para trazer:
@@ -218,9 +251,9 @@ e por estação).
 | `02_permutacao_importancia.parquet` | modelo × trimestre × split × variável × repetição | `rmse_sem_permutar, rmse_permutado, d_rmse, d_rmse_p90, n_colunas, na_selecao_val12` (inclui `ctrl_noise`) |
 | `03_decisao_selecao.parquet` | modelo × split × variável | `d_rmse_medio, d_rmse_<trimestre>, trimestres_positivos, piso_ruido, decisao, na_selecao_val12, n_modelos_que_mantem_val`. **Oficial: `modelo == "LGBMRegressor (seleção)"` e `split == "val"`** |
 | `04_grupos_efeitos.parquet` | comparação × família/trimestre | `effects`, `effects_by_season`, `ranking_groups` do estudo (`origem`: árvores 5 seeds / LSTM) |
-| `05_comparacao_arms_teste.parquet` | (arm, trimestre, modelo, seed, linha de teste) | arms `base, full, sel__val12, drop_grp__grupo1, add_grp__*, ctrl__*`, com `y_true, y_pred, era5_gust_max, estacao, time, lat/lon`. `y_pred` vem do resíduo gravado mais `y_true` (conferido contra `preds__*`, diferença < 1e-6) |
+| `05_comparacao_arms_teste.parquet` | (origem, arm, trimestre, modelo, seed, linha de teste) | `origem` = árvores top-5 Modal (5 seeds) ou LSTM (seed 42); arms `base, full, sel__val12, sel__val12_sem_anor, drop_grp__grupo1, add_grp__*, ctrl__*`, com `y_true, y_pred, era5_gust_max, estacao, time, lat/lon`. `y_pred` vem do resíduo gravado mais `y_true` (conferido contra `preds__*`, diferença < 1e-6) |
 | `06_metricas_arms.parquet` | arm × trimestre × modelo × seed × split | `R2, RMSE, Bias, Bias_P90, RMSE_P90`, como gravadas pelo estudo |
-| `07_*` | — | pendente (seção 6) |
+| `07_*` | — | pendente (seção 7) |
 | `08_grupos_isolados_metricas.parquet` | grupo × trimestre × modelo × seed × split | `origem` (`top5_estudo` / `lgbm_notebook`), `rank_top5_estudo`, métricas |
 | `08_grupos_isolados_predicoes_teste.parquet` | (grupo, trimestre, modelo, seed, linha de teste) | `y_pred, y_true, era5_gust_max, estacao, time` |
 | `08_grupos_isolados_resumo.parquet` | grupo × trimestre × modelo (média das seeds) e agregado | `RMSE_test` (± dp das seeds), `RMSE_test_ic95_inf/sup` (bootstrap em blocos), `R2_val`, ERA5 |
