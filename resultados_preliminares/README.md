@@ -80,7 +80,43 @@ nas 5 seeds, agora com **um grupo de cada vez**.
   foram olhados na época.
 - Referências: só ruído (o piso) e a rajada ERA5 bruta.
 
-<!-- TABELA_GRUPOS -->
+RMSE no teste:
+
+- *top-5*: média das 5 seeds × 5 modelos × 4 trimestres;
+- *melhor na validação*: em cada trimestre, o modelo do top-5 com maior R² de validação;
+- *IC 95 %*: bootstrap em blocos (ano, mês), agregado dos 4 trimestres, seed 42, modelo da 1ª posição.
+
+| entrada | top-5 (média) | melhor na validação | LightGBM (seção 7) | IC 95 % (posição 1) |
+|---|---|---|---|---|
+| **grupo 1 sozinho** (= `base`) | **2,300** | **2,250** | **2,282** | [2,12; 2,45] |
+| grupo 3 sozinho | 2,896 | 2,859 | 2,887 | [2,74; 3,01] |
+| grupo 2 sozinho | 3,184 | 3,139 | 3,143 | [3,03; 3,29] |
+| grupo 4 sozinho | 3,261 | 3,259 | 3,259 | [3,12; 3,40] |
+| só ruído (piso) | 3,886 | 3,624 | 3,677 | [3,73; 4,05] |
+| ERA5 bruto | 2,658 | — | — | [2,51; 2,80] |
+
+Melhor modelo na validação, por grupo e trimestre (`08_grupos_isolados_resumo`, coluna `melhor_val_r2`):
+
+| grupo | DJF | MAM | JJA | SON |
+|---|---|---|---|---|
+| 1 | CatBoost | ExtraTrees | CatBoost | CatBoost |
+| 2 | RandomForest | ExtraTrees | CatBoost | ExtraTrees |
+| 3 | CatBoost | RandomForest | CatBoost | CatBoost |
+| 4 | RandomForest | ExtraTrees | LinearRegression | RandomForest |
+
+**Leitura:** só o grupo 1, sozinho, supera o ERA5, com ~13 % a menos de RMSE. Os grupos 2, 3 e 4 sozinhos
+ganham do piso de ruído (têm alguma informação), mas ficam **piores que o ERA5 bruto**. Somados ao grupo 1,
+não acrescentam nada (seção 2). Por isso a seleção de variáveis parte do grupo 1.
+
+**Conferência de reprodução** (`08_conferencia_grupo1_vs_base`), grupo 1 sozinho contra o `base` gravado
+no Modal, por modelo:
+
+- **ΔRMSE = 0 exato** para CatBoost, LightGBM, ExtraTrees, LinearRegression, BayesianRidge e SGD;
+- diferença de até **0,015 m/s** (média 0,002) para RandomForest, HistGB, Bagging e MLP.
+
+A diferença vem do ambiente: a imagem do Modal instala versões não fixadas em Python 3.11, e aqui foi
+Python 3.13 com scikit-learn 1.8. Para os números **originais** do `base`, use `05_*`/`06_*`. Os grupos
+2–4 sozinhos não existiam no estudo; foram ajustados aqui pelo mesmo caminho.
 
 ## 3. Etapa 2 — da escolha do grupo à escolha da variável (permutação)
 
