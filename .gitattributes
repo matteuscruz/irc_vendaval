@@ -4,3 +4,4 @@ dataset_lfs/shp/*.shp filter=lfs diff=lfs merge=lfs -text
 dataset_lfs/shp/*.dbf filter=lfs diff=lfs merge=lfs -text
 resultados_lfs/**/*.parquet filter=lfs diff=lfs merge=lfs -text
 resultados_lfs/**/*.png filter=lfs diff=lfs merge=lfs -text
+# resultados_preliminares/ fica FORA do LFS de propósito (arquivos < 100 MB, versionados direto no git)
