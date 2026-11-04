@@ -117,11 +117,16 @@ plt.show()
 """)
 
 md("""
-**Leitura.** Só o **grupo 1** acrescenta: removê-lo custa +0,216 m/s, cerca de nove vezes o SESOI.
-Somar os grupos 2 e 3 não traz nada (intervalos dentro da faixa cinza). O **grupo 4**
-ganha +0,021, e o controle com estáticas **permutadas entre estações** ganha +0,019: as
-duas barras são indistinguíveis (`estática real − permutada` = +0,002), então a
-informação está em *saber qual é a estação*, não no relevo. O controle de ruído é zero.
+**Leitura.**
+- **No erro do dia a dia, a LSTM global anual é a melhor opção**: tem o menor RMSE em todos os clusters, tanto no teste
+  (2,28/2,24/2,33/2,57/1,85 contra 2,62/2,54/2,66/3,44/2,27 do ERA5) quanto em 2025. O global anual também ganha do
+  global por trimestre nas duas famílias.
+- **Nenhum modelo sem EQM detecta extremos** (POD P99 ≤ 0,14, abaixo do ERA5): a regressão puxa a cauda para a média.
+- **Com EQM, todos recuperam a cauda.** O modelo final (LSTM anual + EQM) fica abaixo do ERA5 no RMSE em todos os
+  clusters, com POD P99 de 0,13–0,28, perto ou acima do ERA5. Nos extremos, **o ML global anual + EQM (CatBoost)
+  detecta um pouco mais** (0,15–0,31) e não precisa de janelas de 24 h nem de GPU. É a alternativa quando a prioridade
+  é a cauda.
+- **Limites:** uma seed; os modelos locais generalizam mal fora do próprio cluster (`documentation/13_regional_rs_sc.md`).
 """)
 
 # ── Fig 2 ───────────────────────────────────────────────────────────────────
@@ -406,6 +411,75 @@ md("""
   vem de pouquíssimos alarmes), e uma seed na LSTM com um modelo por trimestre no ML não permite concluir diferenças pequenas.
 """)
 
+# ── Fig 5c: a mesma Figura 5, selecionadas contra cada grupo ─────────────────
+md("""
+### Figura 5c: as variáveis selecionadas contra cada grupo
+
+A mesma calibração e detecção da Figura 5, agora só com o **melhor ML de cada trimestre** (o mesmo modelo em todos)
+treinado com conjuntos diferentes de colunas: **grupo I** sozinho (`base`), **grupo I + II**, **I + III**, **I + IV**,
+**todos os grupos** (`full`) e as **selecionadas** (`sel__val12`). Os grupos II, III e IV não existem isolados
+(sem o grupo I) nos resultados gravados. Todos nas mesmas linhas do teste; nada é retreinado.
+""")
+
+py("""
+from src.feature_study.diagnostics import seasonal_distribution as sd
+
+ARMS5C = {"ML, grupo I": "base", "ML, I + II": "add_grp__grupo2", "ML, I + III": "add_grp__grupo3",
+          "ML, I + IV": "add_grp__grupo4", "ML, todos os grupos": "full", "ML, selecionadas": "sel__val12"}
+p5c = sd.load_series(MODAL, LOCAL, campeao, ARMS5C, {}).rename(columns={sd.INMET: "y"})
+PREV5C = [pc.ERA5, *ARMS5C]
+cal5c, exc5c = pc.curves(p5c, PREV5C)
+N_COL = {"ML, grupo I": 43, "ML, I + II": 73, "ML, I + III": 73, "ML, I + IV": 81, "ML, todos os grupos": 167,
+         "ML, selecionadas": 58}
+arms_json = {a["name"]: len(a["features"]) for a in json.loads((LOCAL / "data/arms.json").read_text())}
+N_COL = {k: arms_json.get(v, N_COL[k]) for k, v in ARMS5C.items()}
+print(f"{len(p5c)} linhas, as mesmas para os {len(PREV5C)} previsores | colunas por conjunto:", N_COL)
+
+ESTILO5C = {pc.ERA5: ("#c44", "s--"), "ML, grupo I": (COR_G["grupo1"], "o-"), "ML, I + II": (COR_G["grupo2"], "o-"),
+            "ML, I + III": (COR_G["grupo3"], "o-"), "ML, I + IV": (COR_G["grupo4"], "o-"),
+            "ML, todos os grupos": ("#888888", "d-"), "ML, selecionadas": ("#111111", "o--")}
+esc5c = list(cal5c.escopo.unique())
+fig, axes = plt.subplots(len(esc5c), 3, figsize=(17, 4.3 * len(esc5c)), constrained_layout=True)
+larg = 0.8 / len(ESTILO5C)
+for lin, esc in zip(axes, esc5c):
+    a = lin[0]
+    for nome, (cor, est) in ESTILO5C.items():
+        g = cal5c[(cal5c.escopo == esc) & (cal5c.previsor == nome)]
+        a.plot(g.prev_media, g.obs_media, est, color=cor, ms=3.5, lw=2.2 if nome == "ML, selecionadas" else 1.3,
+               label=nome if nome == pc.ERA5 else f"{nome} ({N_COL[nome]} col.)")
+    c = cal5c[cal5c.escopo == esc]
+    lim = [c.prev_media.min() - 0.5, c.prev_media.max() + 0.5]
+    a.plot(lim, lim, "k:", lw=1, label="calibração perfeita")
+    a.set_xlabel("previsão média na faixa (m/s)"); a.set_ylabel(f"{esc}\\nobservado médio (m/s)")
+    a.set_title("calibração" if esc == esc5c[0] else "", fontsize=10)
+    for a, col, tit in ((lin[1], "pod", "POD: extremos observados previstos"), (lin[2], "far", "FAR: alarmes falsos")):
+        e = exc5c[exc5c.escopo == esc]
+        for i, (nome, (cor, _)) in enumerate(ESTILO5C.items()):
+            g = e[e.previsor == nome]
+            xs = np.arange(len(g)) + (i - (len(ESTILO5C) - 1) / 2) * larg
+            a.bar(xs, g[col], larg, color=cor, edgecolor="black", linewidth=0.4,
+                  hatch="//" if nome == "ML, selecionadas" else None)
+            for x, v in zip(xs, g[col]):
+                a.text(x, v + 0.01, f"{v:.2f}", ha="center", fontsize=5.5, rotation=90)
+        ref = e[e.previsor == pc.ERA5]
+        a.set_xticks(np.arange(len(ref)))
+        a.set_xticklabels([f"{r.limiar}\\n({r['valor_m/s']:.1f} m/s)" for _, r in ref.iterrows()], fontsize=8.5)
+        a.set_ylim(0, max(0.75, float(e[col].max()) * 1.15))
+        a.set_title(tit if esc == esc5c[0] else "", fontsize=10)
+        a.grid(axis="y", alpha=0.3)
+h, l = axes[0, 0].get_legend_handles_labels()
+fig.legend(h, l, loc="lower center", ncol=8, fontsize=8.5, frameon=False, bbox_to_anchor=(0.5, -0.012))
+fig.suptitle("Figura 5c: calibração e detecção de extremos do melhor ML com cada conjunto de variáveis "
+             "(selecionadas = preto, hachurado)", fontsize=12.5)
+plt.show()
+
+rm5c = {esc: {p: float(np.sqrt(np.mean((d[p] - d["y"]) ** 2))) for p in PREV5C} for esc, d in pc.scopes(p5c).items()}
+print("RMSE no teste (m/s):"); print(pd.DataFrame(rm5c).T[PREV5C].round(3).to_string())
+print("\\nPOD e FAR, todos os trimestres:")
+print(exc5c[exc5c.escopo == pc.TODOS].pivot_table(index="limiar", columns="previsor", values=["pod", "far"])
+      .round(2).reindex(columns=PREV5C, level=1).to_string())
+""")
+
 # ── Fig 5b: exemplos de acerto, extremo perdido e falso alarme ─────────────
 md("""
 ### Como POD e FAR contam: exemplos reais
@@ -658,25 +732,63 @@ ROT7 = {sd.INMET: "INMET", sd.ERA5: "ERA5", "ML, grupo I (base)": "ML\\nI", "ML,
 imp = pd.concat([pd.read_parquet(LOCAL / f"units/full_lstm/importance__{s}__full.parquet") for s in sd.SEASONS])
 imp = imp[imp.nivel == "coluna"]
 
-fig = plt.figure(figsize=(20, 9.5))
-gs = fig.add_gridspec(2, 4, height_ratios=[1.5, 1], hspace=0.45, wspace=0.95)
-for j, s in enumerate(sd.SEASONS):
-    ax = fig.add_subplot(gs[0, j])
+# figura 7a: distribuição por trimestre (uma linha, painéis colados, eixo y próprio de cada trimestre)
+fig, axs = plt.subplots(1, 4, figsize=(17, 4.8), constrained_layout=True)
+for ax, s in zip(axs, sd.SEASONS):
     d = diaria[diaria.season == s]
-    bp = ax.boxplot([d[c].dropna() for c in COLS], patch_artist=True, widths=0.65, showfliers=False,
+    bp = ax.boxplot([d[c].dropna() for c in COLS], patch_artist=True, widths=0.7, showfliers=False,
                     medianprops=dict(color="white", lw=1.6))
     for b, c in zip(bp["boxes"], COLS):
         b.set(facecolor=COR7[c], alpha=0.85, edgecolor="none")
-    ax.set_xticks(range(1, len(COLS) + 1)); ax.set_xticklabels([ROT7[c] for c in COLS], fontsize=7)
-    ax.set_title(f"{s}  (n = {len(d)} dias)", fontweight="bold"); ax.set_ylabel("rajada diária média (m/s)" if j == 0 else "")
+    ax.set_xticks(range(1, len(COLS) + 1)); ax.set_xticklabels([ROT7[c] for c in COLS], fontsize=7.5)
+    ax.set_title(f"{s}  (n = {len(d)} dias)", fontweight="bold")
     ax.axhline(d[sd.INMET].median(), color="#111", lw=0.8, ls=":")
+axs[0].set_ylabel("rajada diária média (m/s)")
+fig.suptitle("Distribuição da rajada diária por trimestre climático e por método (teste, média entre estações; "
+             "pontilhado = mediana do INMET)", fontsize=12)
+plt.show()
+
+# figura 7b: as 5 colunas mais importantes da LSTM por trimestre (2 × 2, espaço para os nomes)
+fig, axs = plt.subplots(2, 2, figsize=(13, 6.5), constrained_layout=True)
+for ax, s in zip(axs.flat, sd.SEASONS):
     t = (imp[imp.season == s].groupby(["nome", "grupo"]).d_rmse.mean().reset_index()
          .nlargest(5, "d_rmse").iloc[::-1])
-    ax2 = fig.add_subplot(gs[1, j])
-    ax2.barh(t.nome, t.d_rmse, color=[COR_G.get(g, "#999") for g in t.grupo])
-    ax2.set_title(f"top-5 colunas da LSTM — {s}", fontsize=9); ax2.set_xlabel("Δ RMSE ao permutar (m/s)")
-fig.suptitle("Distribuição da rajada diária por trimestre climático e por método (teste, média entre estações)", y=0.96, fontsize=13)
+    ax.barh(t.nome, t.d_rmse, color=[COR_G.get(g, "#999") for g in t.grupo])
+    ax.set_title(s, fontweight="bold"); ax.set_xlabel("Δ RMSE ao permutar (m/s)")
+axs[0, 1].legend(handles=[plt.Rectangle((0, 0), 1, 1, color=COR_G[g]) for g in ("grupo1", "grupo2", "grupo3", "grupo4")],
+                 labels=["grupo 1", "grupo 2", "grupo 3", "grupo 4"], loc="lower right", fontsize=8)
+fig.suptitle("Top-5 colunas da LSTM por trimestre (importância por permutação, arm full)", fontsize=12)
 plt.show()
+
+# figura 7c: regressão contra o INMET, por trimestre (mesma série diária dos boxplots)
+METODOS = [c for c in COLS if c != sd.INMET]
+fig, axs = plt.subplots(1, 4, figsize=(19, 5.4), constrained_layout=True)
+reg = []
+for ax, s in zip(axs, sd.SEASONS):
+    d = diaria[diaria.season == s].dropna(subset=COLS)
+    x = d[sd.INMET].to_numpy()
+    for c in (sd.ERA5, "ML, selecionadas"):                       # pontos só de dois, para não poluir
+        ax.scatter(x, d[c], s=6, alpha=0.25, color=COR7[c], zorder=1)
+    xx = np.array([x.min(), x.max()])
+    for c in METODOS:
+        a_, b_ = np.polyfit(x, d[c], 1)
+        r2 = float(np.corrcoef(x, d[c])[0, 1] ** 2)
+        reg.append({"trimestre": s, "metodo": c, "inclinação": a_, "intercepto": b_, "R2": r2,
+                    "RMSE": float(np.sqrt(((d[c] - x) ** 2).mean()))})
+        ax.plot(xx, a_ * xx + b_, color=COR7[c], lw=2.2 if c in (sd.ERA5, "ML, selecionadas", "LSTM, selecionadas") else 1.1,
+                label=f"{ROT7[c].replace(chr(10), ' ')}: incl. {a_:.2f}, R² {r2:.2f}", zorder=3)
+    ax.plot(xx, xx, "k--", lw=0.8, zorder=2)
+    ax.set_title(s, fontweight="bold"); ax.set_xlabel("INMET (m/s)"); ax.set_aspect("equal")
+    ax.legend(fontsize=6.5, loc="upper left")
+axs[0].set_ylabel("método (m/s)")
+fig.suptitle("Regressão contra o INMET por trimestre (rajada diária média entre estações, teste). "
+             "Inclinação 1 = acompanha o INMET; pontos: ERA5 e ML selecionadas", fontsize=12)
+plt.show()
+reg = pd.DataFrame(reg)
+print("Inclinação da reta (1 = ideal):")
+print(reg.pivot(index="metodo", columns="trimestre", values="inclinação").reindex(METODOS)[list(sd.SEASONS)].round(2).to_string())
+print("\\nR² (fração da variância do INMET explicada):")
+print(reg.pivot(index="metodo", columns="trimestre", values="R2").reindex(METODOS)[list(sd.SEASONS)].round(2).to_string())
 
 est7 = sd.summary(diaria, COLS)
 print(est7.pivot_table(index="metodo", columns="escopo", values="mediana").reindex(COLS)[["Todos", *sd.SEASONS]].round(2).to_string())

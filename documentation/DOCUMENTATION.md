@@ -15,6 +15,11 @@ e detalhes de implementação.
 - [Inferência e artefatos](08_inferencia_e_artefatos.md)
 - [Estudo de informação de features](09_estudo_de_features.md)
 - [Contexto, estrutura e histórico](10_contexto_e_historico.md)
+- [Mapeamento de quantis (Corrigido ML)](11_mapeamento_de_quantis.md)
+- [Features selecionadas: nomes e significado](12_features_selecionadas.md)
+- [RS/SC: generalização e modelos regionais](13_regional_rs_sc.md)
+- [ML × LSTM: local, regional, global e LOCO](14_ml_vs_lstm_global.md)
+- [Pipeline do modelo: dados, treino, validação e dataset de predições](15_pipeline_do_modelo.md)
 
 ## Como usar esta pasta
 

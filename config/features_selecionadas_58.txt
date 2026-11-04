@@ -1,0 +1,67 @@
+# 58 colunas selecionadas (arm sel__val12)
+# Uma linha por (célula/estação, dia), na hora de maior rajada ERA5 do dia (UTC).
+# Raios de 75/250 km: células da grade ERA5 (0,25°) a até essa distância (haversine).
+# código	nome da variável	unidade	fonte
+
+## Grupo 1
+gust_r250_max	Rajada de vento a 10 m, máximo no raio de 250 km em torno da célula	m/s	ERA5 10fg, paramId 49
+gust_r250_median	Rajada de vento a 10 m, mediana no raio de 250 km em torno da célula	m/s	ERA5 10fg, paramId 49
+gust_r250_std	Rajada de vento a 10 m, desvio-padrão no raio de 250 km em torno da célula	m/s	ERA5 10fg, paramId 49
+gust_r75_max	Rajada de vento a 10 m, máximo no raio de 75 km em torno da célula	m/s	ERA5 10fg, paramId 49
+gust_r75_median	Rajada de vento a 10 m, mediana no raio de 75 km em torno da célula	m/s	ERA5 10fg, paramId 49
+gust_r75_std	Rajada de vento a 10 m, desvio-padrão no raio de 75 km em torno da célula	m/s	ERA5 10fg, paramId 49
+gust10fg	Rajada de vento a 10 m, na célula, na hora do pico	m/s	ERA5 10fg, paramId 49
+gust10fg_delta3h	Rajada de vento a 10 m, variação em 3 horas: valor no pico menos valor em t−3	m/s	ERA5 10fg, paramId 49
+gust10fg_lag1h	Rajada de vento a 10 m, 1 hora antes do pico (t−1)	m/s	ERA5 10fg, paramId 49
+gust10fg_max_prev3h	Rajada de vento a 10 m, máximo nas 3 horas antes do pico (t−3 a t−1)	m/s	ERA5 10fg, paramId 49
+gust10fg_std_prev3h	Rajada de vento a 10 m, desvio-padrão nas 3 horas antes do pico (t−3 a t−1)	m/s	ERA5 10fg, paramId 49
+hora_solar_sin	Seno da hora solar média, sen(2π·h/24), h = (hora UTC + lon/15) mod 24	adimensional	calculada (hora + longitude)
+v10	Componente meridional (norte-sul) do vento a 10 m, na célula, na hora do pico	m/s	ERA5 10v, paramId 166
+v100	Componente meridional (norte-sul) do vento a 100 m, na célula, na hora do pico	m/s	ERA5 100v, paramId 228247
+w10	Velocidade do vento a 10 m, raiz(u10² + v10²), na célula, na hora do pico	m/s	ERA5 10u/10v, paramId 165/166
+w10_delta3h	Velocidade do vento a 10 m, raiz(u10² + v10²), variação em 3 horas: valor no pico menos valor em t−3	m/s	ERA5 10u/10v, paramId 165/166
+w10_lag1h	Velocidade do vento a 10 m, raiz(u10² + v10²), 1 hora antes do pico (t−1)	m/s	ERA5 10u/10v, paramId 165/166
+w10_max_prev3h	Velocidade do vento a 10 m, raiz(u10² + v10²), máximo nas 3 horas antes do pico (t−3 a t−1)	m/s	ERA5 10u/10v, paramId 165/166
+w10_r250_median	Velocidade do vento a 10 m, raiz(u10² + v10²), mediana no raio de 250 km em torno da célula	m/s	ERA5 10u/10v, paramId 165/166
+w10_r250_std	Velocidade do vento a 10 m, raiz(u10² + v10²), desvio-padrão no raio de 250 km em torno da célula	m/s	ERA5 10u/10v, paramId 165/166
+w10_r75_max	Velocidade do vento a 10 m, raiz(u10² + v10²), máximo no raio de 75 km em torno da célula	m/s	ERA5 10u/10v, paramId 165/166
+w10_r75_median	Velocidade do vento a 10 m, raiz(u10² + v10²), mediana no raio de 75 km em torno da célula	m/s	ERA5 10u/10v, paramId 165/166
+w10_r75_std	Velocidade do vento a 10 m, raiz(u10² + v10²), desvio-padrão no raio de 75 km em torno da célula	m/s	ERA5 10u/10v, paramId 165/166
+w10_std_prev3h	Velocidade do vento a 10 m, raiz(u10² + v10²), desvio-padrão nas 3 horas antes do pico (t−3 a t−1)	m/s	ERA5 10u/10v, paramId 165/166
+w100	Velocidade do vento a 100 m, raiz(u100² + v100²), na célula, na hora do pico	m/s	ERA5 100u/100v, paramId 228246/228247
+## Grupo 2
+cape	Energia potencial convectiva disponível (CAPE), na célula, na hora do pico	J/kg	ERA5 cape, paramId 59
+cape_c75_250	Energia potencial convectiva disponível (CAPE), contraste: mediana em 75 km menos mediana em 250 km	J/kg	ERA5 cape, paramId 59
+cape_delta3h	Energia potencial convectiva disponível (CAPE), variação em 3 horas: valor no pico menos valor em t−3	J/kg	ERA5 cape, paramId 59
+cape_l75_250	Energia potencial convectiva disponível (CAPE), contraste: máximo em 75 km menos mediana em 250 km	J/kg	ERA5 cape, paramId 59
+cape_lag1h	Energia potencial convectiva disponível (CAPE), 1 hora antes do pico (t−1)	J/kg	ERA5 cape, paramId 59
+cape_max_prev3h	Energia potencial convectiva disponível (CAPE), máximo nas 3 horas antes do pico (t−3 a t−1)	J/kg	ERA5 cape, paramId 59
+cape_r250_median	Energia potencial convectiva disponível (CAPE), mediana no raio de 250 km em torno da célula	J/kg	ERA5 cape, paramId 59
+cape_r75_max	Energia potencial convectiva disponível (CAPE), máximo no raio de 75 km em torno da célula	J/kg	ERA5 cape, paramId 59
+cape_r75_median	Energia potencial convectiva disponível (CAPE), mediana no raio de 75 km em torno da célula	J/kg	ERA5 cape, paramId 59
+cape_r75_std	Energia potencial convectiva disponível (CAPE), desvio-padrão no raio de 75 km em torno da célula	J/kg	ERA5 cape, paramId 59
+cape_std_prev3h	Energia potencial convectiva disponível (CAPE), desvio-padrão nas 3 horas antes do pico (t−3 a t−1)	J/kg	ERA5 cape, paramId 59
+mcpr	Taxa média de precipitação convectiva, na célula, na hora do pico	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_delta3h	Taxa média de precipitação convectiva, variação em 3 horas: valor no pico menos valor em t−3	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_l75_250	Taxa média de precipitação convectiva, contraste: máximo em 75 km menos mediana em 250 km	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_lag1h	Taxa média de precipitação convectiva, 1 hora antes do pico (t−1)	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_max_prev3h	Taxa média de precipitação convectiva, máximo nas 3 horas antes do pico (t−3 a t−1)	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_r250_max	Taxa média de precipitação convectiva, máximo no raio de 250 km em torno da célula	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_r250_median	Taxa média de precipitação convectiva, mediana no raio de 250 km em torno da célula	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_r75_fracpos	Taxa média de precipitação convectiva, fração das células com valor > 0 no raio de 75 km em torno da célula	fração (0–1)	ERA5 mcpr, paramId 235030
+mcpr_r75_max	Taxa média de precipitação convectiva, máximo no raio de 75 km em torno da célula	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_r75_std	Taxa média de precipitação convectiva, desvio-padrão no raio de 75 km em torno da célula	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+mcpr_std_prev3h	Taxa média de precipitação convectiva, desvio-padrão nas 3 horas antes do pico (t−3 a t−1)	kg m⁻² s⁻¹	ERA5 mcpr, paramId 235030
+## Grupo 3
+grad_mslp_r250_median	Módulo do gradiente horizontal da pressão ao nível do mar, mediana no raio de 250 km em torno da célula	hPa/100 km	ERA5 msl, paramId 151
+grad_mslp_hpa_100km	Módulo do gradiente horizontal da pressão ao nível do mar, na célula	hPa/100 km	ERA5 msl, paramId 151
+## Grupo 4
+anor_ponto	Ângulo da orografia subgrade (orientação do relevo), valor na célula	rad	ERA5 anor, paramId 162, estático
+anor_r250_max	Ângulo da orografia subgrade (orientação do relevo), máximo no raio de 250 km em torno da célula	rad	ERA5 anor, paramId 162, estático
+anor_r250_mean	Ângulo da orografia subgrade (orientação do relevo), média no raio de 250 km em torno da célula	rad	ERA5 anor, paramId 162, estático
+anor_r250_min	Ângulo da orografia subgrade (orientação do relevo), mínimo no raio de 250 km em torno da célula	rad	ERA5 anor, paramId 162, estático
+anor_r250_std	Ângulo da orografia subgrade (orientação do relevo), desvio-padrão no raio de 250 km em torno da célula	rad	ERA5 anor, paramId 162, estático
+anor_r75_max	Ângulo da orografia subgrade (orientação do relevo), máximo no raio de 75 km em torno da célula	rad	ERA5 anor, paramId 162, estático
+anor_r75_mean	Ângulo da orografia subgrade (orientação do relevo), média no raio de 75 km em torno da célula	rad	ERA5 anor, paramId 162, estático
+anor_r75_min	Ângulo da orografia subgrade (orientação do relevo), mínimo no raio de 75 km em torno da célula	rad	ERA5 anor, paramId 162, estático
+anor_r75_std	Ângulo da orografia subgrade (orientação do relevo), desvio-padrão no raio de 75 km em torno da célula	rad	ERA5 anor, paramId 162, estático
