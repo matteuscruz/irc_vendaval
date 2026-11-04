@@ -5,8 +5,8 @@ Etapas (`--etapas`, padrão todas):
   permutacao  importância por permutação por VARIÁVEL (o instrumento que escolheu as 12
               variáveis de `config/selected_features_val12.json`), com as predições de cada
               modelo para cada variável embaralhada → 01_*, 02_*, 03_*
-  grupos      cada grupo (1..4) SOZINHO, triagem com todos os regressores do estudo, top-5 e
-              campeão por trimestre na validação, top-5 refeito nas 5 seeds → 08_*
+  grupos      cada grupo (1..4) SOZINHO, com o top-5 congelado do estudo (5 seeds, `fit_arm`)
+              e o LightGBM da seção 7 do notebook; grupo 1 sozinho == arm `base` → 08_*
   compilar    junta o que o estudo já gravou (efeitos dos grupos, predições e métricas dos
               arms base / sel__val12 / full) → 04_*, 05_*, 06_*
 
@@ -32,8 +32,7 @@ import pandas as pd
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))
 
-from src.feature_study.core.analysis import EQUIV_TOL_P90, EQUIV_TOL_R2  # noqa: E402
-from src.feature_study.core.config import CHAMPION_SLACK, CLIP_RANGE, MODEL_SEEDS  # noqa: E402
+from src.feature_study.core.config import CLIP_RANGE  # noqa: E402
 from src.feature_study.core.worker import select_regressors  # noqa: E402
 from src.feature_study.selection.selected import columns_of, load_selection, variable_of  # noqa: E402
 from src.pipelines.common import compute_metrics, preprocess_df  # noqa: E402
@@ -243,33 +242,15 @@ def decisao(resumo, sel, grupo_var):
         print(f"[decisão] seleção refeita == JSON congelado ({len(refeita)} variáveis)")
 
 
-# ── 8. cada grupo sozinho ──────────────────────────────────────────────────────
-
-def ranking_val(met, k=5, slack=CHAMPION_SLACK):
-    """Regra do `screen` (`analysis.top_models_by_season`): entre os modelos a até `slack`
-    do melhor R² de validação, menor RMSE_P90; completa por R²; equivalentes contam uma vez."""
-    g = met[(met.split == "val") & met.R2.notna() & met.RMSE_P90.notna()]
-    eleg = g[g.R2 >= g.R2.max() - slack].sort_values("RMSE_P90")
-    cand = list(eleg.model) + list(g[~g.model.isin(eleg.model)].sort_values("R2", ascending=False).model)
-    pm = g.set_index("model")
-    escolhidos, omit = [], {}
-    for m in cand:
-        gem = next((e for e in escolhidos if abs(pm.R2[e] - pm.R2[m]) <= EQUIV_TOL_R2
-                    and abs(pm.RMSE_P90[e] - pm.RMSE_P90[m]) <= EQUIV_TOL_P90), None)
-        if gem:
-            omit.setdefault(gem, []).append(m)
-        else:
-            escolhidos.append(m)
-    return escolhidos, omit, k
-
+# ── 8. cada grupo sozinho (mesmo caminho do estudo) ────────────────────────────
 
 def bootstrap_blocos(df, col_pred, n=1000, seed=42):
-    """IC 95 % do RMSE de teste com bootstrap em blocos (ano, mês), como no estudo."""
+    """IC 95 % do RMSE de teste com bootstrap em blocos (ano, mês), como na seção 7 do
+    notebook (`rng.multinomial` sobre os blocos, 1000 sorteios, seed 42)."""
     bloco = (df.year * 100 + df.month).to_numpy()
     ub, inv = np.unique(bloco, return_inverse=True)
     e2 = (df[col_pred].to_numpy() - df.y_true.to_numpy()) ** 2
-    soma = np.bincount(inv, weights=e2)
-    cont = np.bincount(inv)
+    soma, cont = np.bincount(inv, weights=e2), np.bincount(inv)
     rng = np.random.default_rng(seed)
     w = rng.multinomial(len(ub), np.ones(len(ub)) / len(ub), size=n)
     r = np.sqrt((w @ soma) / (w @ cont))
@@ -277,135 +258,141 @@ def bootstrap_blocos(df, col_pred, n=1000, seed=42):
 
 
 def etapa_grupos(dados):
+    """Cada grupo SOZINHO, pelo mesmo caminho do estudo de referência:
+      (a) os modelos do estudo: o top-5 por trimestre CONGELADO pelo `screen` no arm `base`
+          (`cluster3_groups_modal/summary/top_models.json`), ajustado com a própria
+          `worker.fit_arm` nas 5 seeds (42–46). O grupo 1 sozinho É o arm `base`
+          (mesmas 45 colunas, mesma ordem): suas métricas têm de reproduzir as gravadas.
+      (b) o LightGBM da seção 7 do notebook (“cada grupo isolado”), seed 42, sem escala.
+    Referências: só ruído (`ctrl_noise`, o piso da seção 7) e a rajada ERA5 bruta."""
+    from lightgbm import LGBMRegressor
+
+    from src.feature_study.core.worker import fit_arm
+
     meta, full, treino, val, teste = dados
     arms = {f"so_{g}": [c for c in full if meta["group_of"].get(c) == g] for g in ROTULO}
     arms["so_ruido"] = [RUIDO]
-    todos = [c.__name__ for c in select_regressors("all")]
-    print(f"[grupos] {len(todos)} regressores | colunas por arm: "
-          f"{ {a: len(c) for a, c in arms.items()} }", flush=True)
+    top5 = json.loads((ESTUDO_M / "summary/top_models.json").read_text())["by_season"]
+    seeds = json.loads((ESTUDO / "data/meta.json").read_text())["model_seeds"]
+    print(f"[grupos] colunas por arm: { {a: len(c) for a, c in arms.items()} } | seeds {seeds}", flush=True)
 
     mets, preds = [], []
     for arm, cols in arms.items():
         for s in SEASONS:
             t0 = time.time()
-            tr, va, te = (d[d.season == s] for d in (treino, val, teste))
-            y_tr, y_va, y_te = (d[ALVO].to_numpy(float) for d in (tr, va, te))
-            x_tr, x_va = preprocess_df(tr[cols], va[cols])
-            _, x_te = preprocess_df(tr[cols], te[cols])
-            ajust = ajustar_lazy(x_tr, x_va, y_tr, y_va, todos, SEED)
-            for nome, pipe in ajust.items():
-                for split, x, y, d in (("val", x_va, y_va, va), ("test", x_te, y_te, te)):
-                    try:
-                        p = _pred(pipe, x)
-                    except Exception as exc:  # um modelo quebrado não derruba o arm
-                        print(f"   [AVISO] {nome} falhou ({type(exc).__name__})")
-                        continue
-                    mets.append({"arm": arm, "season": s, "model": nome, "model_seed": SEED,
-                                 "split": split, "n": len(y), **metricas(y, p)})
-                    preds.append(pd.DataFrame({"arm": arm, "season": s, "model": nome, "model_seed": SEED,
-                                               "split": split, "row_id": d.row_id.to_numpy(),
-                                               "y_pred": p.astype("float32")}))
-            print(f"  {arm:<12} {s}: {len(ajust)} modelos em {time.time() - t0:.0f}s", flush=True)
+            tr, va, te = (d[d.season == s].reset_index(drop=True) for d in (treino, val, teste))
+            for seed in seeds:
+                p_out = {}
+                m, _, _ = fit_arm(tr, va, te, cols, select_regressors(top5[s]), seed,
+                                  resid_models=frozenset(top5[s]), preds_out=p_out)
+                mets.append(m.assign(arm=arm, season=s, model_seed=seed, origem="top5_estudo"))
+                for nome, p in p_out.items():
+                    preds.append(pd.DataFrame({"arm": arm, "season": s, "model": nome, "model_seed": seed,
+                                               "origem": "top5_estudo", "row_id": te.row_id.to_numpy(),
+                                               "y_pred": p}))
+            # (b) LightGBM da seção 7 do notebook
+            lg = LGBMRegressor(random_state=SEED, verbose=-1, n_jobs=4).fit(tr[cols], tr[ALVO])
+            for split, d in (("val", va), ("test", te)):
+                p = np.asarray(lg.predict(d[cols]), float)
+                mets.append(pd.DataFrame([{"model": "LGBMRegressor (notebook seção 7)", "split": split,
+                                           "n": len(d), **metricas(d[ALVO].to_numpy(float), p)}])
+                            .assign(arm=arm, season=s, model_seed=SEED, origem="lgbm_notebook"))
+                if split == "test":
+                    preds.append(pd.DataFrame({"arm": arm, "season": s, "model": "LGBMRegressor (notebook seção 7)",
+                                               "model_seed": SEED, "origem": "lgbm_notebook",
+                                               "row_id": d.row_id.to_numpy(), "y_pred": p.astype("float32")}))
+            print(f"  {arm:<10} {s}: {time.time() - t0:.0f}s", flush=True)
 
-    met = pd.DataFrame(mets)
-    # top-5 e campeão por arm × trimestre, escolhidos na VALIDAÇÃO
-    met["rank_val"] = np.nan
-    met["equivalentes_omitidos"] = ""
-    top = {}
-    for (arm, s), g in met.groupby(["arm", "season"]):
-        escolhidos, omit, k = ranking_val(g)
-        top[(arm, s)] = escolhidos[:k]
-        for r, m in enumerate(escolhidos[:k], 1):
-            idx = (met.arm == arm) & (met.season == s) & (met.model == m)
-            met.loc[idx, "rank_val"] = r
-            met.loc[idx, "equivalentes_omitidos"] = ", ".join(omit.get(m, []))
-    met["top5"] = met.rank_val.notna()
-    met["campeao"] = met.rank_val == 1
-
-    # top-5 nas outras seeds (só modelos estocásticos mudam)
-    extra_m, extra_p = [], []
-    for (arm, s), modelos in top.items():
-        cols = arms[arm]
-        tr, va, te = (d[d.season == s] for d in (treino, val, teste))
-        y_tr, y_va = tr[ALVO].to_numpy(float), va[ALVO].to_numpy(float)
-        x_tr, x_va = preprocess_df(tr[cols], va[cols])
-        _, x_te = preprocess_df(tr[cols], te[cols])
-        for seed in [x for x in MODEL_SEEDS if x != SEED]:
-            ajust = ajustar_lazy(x_tr, x_va, y_tr, y_va, modelos, seed)
-            for nome, pipe in ajust.items():
-                for split, x, d in (("val", x_va, va), ("test", x_te, te)):
-                    p = _pred(pipe, x)
-                    extra_m.append({"arm": arm, "season": s, "model": nome, "model_seed": seed,
-                                    "split": split, "n": len(d), **metricas(d[ALVO].to_numpy(float), p)})
-                    extra_p.append(pd.DataFrame({"arm": arm, "season": s, "model": nome, "model_seed": seed,
-                                                 "split": split, "row_id": d.row_id.to_numpy(),
-                                                 "y_pred": p.astype("float32")}))
-        print(f"  seeds extras {arm:<12} {s} ok", flush=True)
-    if extra_m:
-        em = pd.DataFrame(extra_m)
-        chave = met[met.model_seed == SEED][["arm", "season", "model", "split", "rank_val",
-                                             "equivalentes_omitidos", "top5", "campeao"]]
-        met = pd.concat([met, em.merge(chave, on=["arm", "season", "model", "split"], how="left")],
-                        ignore_index=True)
-        preds += extra_p
-
+    met = pd.concat(mets, ignore_index=True)
     met["grupo"] = met.arm.str.replace("so_", "")
+    met["rank_top5_estudo"] = [top5[s].index(m) + 1 if m in top5[s] else np.nan
+                               for s, m in zip(met.season, met.model)]
+    keep = ["arm", "grupo", "season", "origem", "model", "rank_top5_estudo", "model_seed", "split", "n",
+            "R2", "RMSE", "Bias", "Bias_P90", "RMSE_P90", "n_nonfinite"]
+    met = met[keep]
     met.to_parquet(SAIDA / "08_grupos_isolados_metricas.parquet", **PARQ)
-    pr = pd.concat(preds, ignore_index=True)
-    lin = linhas(pd.concat([val, teste]))
-    pr = pr.merge(lin[["row_id", "estacao", "time", "y_true", "era5_gust_max"]], on="row_id", how="left")
-    for c in ("arm", "season", "model", "split"):
-        pr[c] = pr[c].astype("category")
-    pr.to_parquet(SAIDA / "08_grupos_isolados_predicoes.parquet", **PARQ)
 
+    lin = linhas(teste.assign(_split="test"))
+    pr = pd.concat(preds, ignore_index=True).merge(
+        lin[["row_id", "estacao", "time", "year", "month", "y_true", "era5_gust_max"]], on="row_id", how="left")
+    for c in ("arm", "season", "model", "origem"):
+        pr[c] = pr[c].astype("category")
+    pr.to_parquet(SAIDA / "08_grupos_isolados_predicoes_teste.parquet", **PARQ)
+
+    conferir_base(met)
     melhores(met, pr, lin)
 
 
+def conferir_base(met):
+    """O grupo 1 sozinho é o arm `base`: as métricas refeitas aqui têm de bater com as do
+    estudo de referência (`units/full*/metrics__<trimestre>__base.parquet`)."""
+    ref = []
+    for pasta in (ESTUDO_M / "units").iterdir():
+        if pasta.name.endswith("_triage") or "lstm" in pasta.name:
+            continue
+        for f in pasta.glob("metrics__*__base.parquet"):
+            ref.append(pd.read_parquet(f))
+    ref = pd.concat(ref)[["season", "model", "model_seed", "split", "RMSE"]]
+    aqui = met[(met.arm == "so_grupo1") & (met.origem == "top5_estudo")]
+    c = aqui.merge(ref, on=["season", "model", "model_seed", "split"], suffixes=("", "_estudo"))
+    dif = (c.RMSE - c.RMSE_estudo).abs()
+    print(f"[grupos] grupo 1 sozinho vs arm `base` do estudo: {len(c)} pares, |ΔRMSE| máx = {dif.max():.2e}, "
+          f"médio = {dif.mean():.2e}", flush=True)
+    c.assign(dif_rmse=c.RMSE - c.RMSE_estudo).to_parquet(
+        SAIDA / "08_conferencia_grupo1_vs_base.parquet", **PARQ)
+
+
 def melhores(met, pr, lin):
-    """Campeão e top-5 de cada grupo × trimestre (média ± dp das 5 seeds) + ERA5 e ruído,
-    e o agregado dos 4 trimestres (campeão de cada trimestre) com IC por blocos."""
-    te = met[(met.split == "test") & met.top5]
-    agg = (te.groupby(["arm", "season", "model", "rank_val"])
+    """Por grupo: o top-5 do estudo (média ± dp das 5 seeds) por trimestre, com o melhor
+    no TESTE só marcado (a escolha do estudo é na validação, `rank_top5_estudo`); e o
+    agregado dos 4 trimestres com IC por blocos, como a seção 7 do notebook."""
+    te = met[met.split == "test"]
+    agg = (te.groupby(["arm", "grupo", "season", "origem", "model", "rank_top5_estudo"], dropna=False)
              .agg(RMSE_test=("RMSE", "mean"), RMSE_test_dp_seeds=("RMSE", "std"),
                   RMSE_P90_test=("RMSE_P90", "mean"), Bias_test=("Bias", "mean"),
-                  Bias_P90_test=("Bias_P90", "mean"), R2_test=("R2", "mean"), n_seeds=("model_seed", "nunique"))
-             .reset_index())
-    va = met[(met.split == "val") & met.top5 & (met.model_seed == SEED)][["arm", "season", "model", "R2", "RMSE_P90"]]
-    agg = agg.merge(va.rename(columns={"R2": "R2_val", "RMSE_P90": "RMSE_P90_val"}),
-                    on=["arm", "season", "model"], how="left")
-    agg["campeao"] = agg.rank_val == 1
-
-    # referências por trimestre: ERA5 bruto
-    t = lin[lin.split == "test"]
-    era = [{"arm": "era5_bruto", "season": s, "model": "ERA5 (rajada bruta)", "rank_val": 1, "campeao": True,
-            **{f"{k}_test": v for k, v in metricas(d.y_true.to_numpy(float), d.era5_gust_max.to_numpy(float)).items()}}
-           for s, d in t.groupby("season")]
-    agg = pd.concat([agg, pd.DataFrame(era)], ignore_index=True)
+                  Bias_P90_test=("Bias_P90", "mean"), R2_test=("R2", "mean"),
+                  n_seeds=("model_seed", "nunique")).reset_index())
+    va = (met[met.split == "val"].groupby(["arm", "season", "model"]).agg(
+        R2_val=("R2", "mean"), RMSE_val=("RMSE", "mean"), RMSE_P90_val=("RMSE_P90", "mean")).reset_index())
+    agg = agg.merge(va, on=["arm", "season", "model"], how="left")
+    agg["melhor_val_r2"] = agg.groupby(["arm", "season"]).R2_val.transform("max") == agg.R2_val
     agg["escopo"] = "trimestre"
 
-    # agregado: campeão de cada trimestre (seed 42) junto, IC bootstrap em blocos (ano, mês)
-    camp = met[(met.split == "test") & met.campeao & (met.model_seed == SEED)][["arm", "season", "model"]]
-    p = pr[(pr.split == "test") & (pr.model_seed == SEED)]
-    p = p.merge(camp, on=["arm", "season", "model"]).merge(lin[["row_id", "year", "month"]], on="row_id")
+    t = lin[lin.split == "test"]
+    era = [{"arm": "era5_bruto", "grupo": "ERA5", "season": s, "origem": "referencia", "model": "ERA5 (rajada bruta)",
+            **{f"{k}_test": v for k, v in metricas(d.y_true.to_numpy(float), d.era5_gust_max.to_numpy(float)).items()},
+            "escopo": "trimestre"} for s, d in t.groupby("season")]
+
+    # agregado: cada modelo nos 4 trimestres (seed 42) — o estudo reporta por modelo e
+    # trimestre; aqui o top-5 vira "rank r do trimestre" para juntar os 4 trimestres
     tot = []
-    for arm, d in p.groupby("arm", observed=True):
-        lo, hi = bootstrap_blocos(d, "y_pred")
-        tot.append({"arm": arm, "season": "todos", "escopo": "agregado (campeão de cada trimestre)",
-                    "model": " / ".join(f"{s}:{m}" for s, m in camp[camp.arm == arm][["season", "model"]].values),
-                    **{f"{k}_test": v for k, v in metricas(d.y_true.to_numpy(float), d.y_pred.to_numpy(float)).items()},
-                    "RMSE_test_ic95_inf": lo, "RMSE_test_ic95_sup": hi})
+    p42 = pr[pr.model_seed == SEED]
+    for (arm, origem), d in p42.groupby(["arm", "origem"], observed=True):
+        if origem == "lgbm_notebook":
+            grupos_d = {"LGBMRegressor (notebook seção 7)": d}
+        else:
+            r = met[(met.arm == arm) & (met.origem == origem)][["season", "model", "rank_top5_estudo"]].drop_duplicates()
+            d = d.merge(r, on=["season", "model"])
+            grupos_d = {f"top-5 do estudo, posição {int(k)}": g for k, g in d.groupby("rank_top5_estudo")}
+            grupos_d["top-5 do estudo, média dos 5"] = (d.groupby(["row_id", "y_true", "year", "month"], as_index=False)
+                                                         .y_pred.mean())
+        for rot, g in grupos_d.items():
+            lo, hi = bootstrap_blocos(g, "y_pred")
+            tot.append({"arm": arm, "grupo": arm.replace("so_", ""), "season": "todos", "origem": origem,
+                        "model": rot, "escopo": "agregado 4 trimestres (seed 42)",
+                        **{f"{k}_test": v for k, v in metricas(g.y_true.to_numpy(float), g.y_pred.to_numpy(float)).items()},
+                        "RMSE_test_ic95_inf": lo, "RMSE_test_ic95_sup": hi})
     t2 = t.assign(y_pred=t.era5_gust_max)
     lo, hi = bootstrap_blocos(t2, "y_pred")
-    tot.append({"arm": "era5_bruto", "season": "todos", "escopo": "agregado", "model": "ERA5 (rajada bruta)",
+    tot.append({"arm": "era5_bruto", "grupo": "ERA5", "season": "todos", "origem": "referencia",
+                "model": "ERA5 (rajada bruta)", "escopo": "agregado 4 trimestres",
                 **{f"{k}_test": v for k, v in metricas(t2.y_true.to_numpy(float), t2.y_pred.to_numpy(float)).items()},
                 "RMSE_test_ic95_inf": lo, "RMSE_test_ic95_sup": hi})
-    out = pd.concat([agg, pd.DataFrame(tot)], ignore_index=True)
-    out["grupo"] = out.arm.str.replace("so_", "")
+    out = pd.concat([agg, pd.DataFrame(era), pd.DataFrame(tot)], ignore_index=True)
     out["descricao_grupo"] = out.grupo.map(DESCR_GRUPO)
-    out.to_parquet(SAIDA / "08_grupos_isolados_melhores.parquet", **PARQ)
-    print(out[out.escopo != "trimestre"][["arm", "RMSE_test", "RMSE_test_ic95_inf",
-                                          "RMSE_test_ic95_sup", "R2_test"]].to_string(index=False))
-
+    out.to_parquet(SAIDA / "08_grupos_isolados_resumo.parquet", **PARQ)
+    print(out[out.escopo != "trimestre"][["arm", "model", "RMSE_test", "RMSE_test_ic95_inf",
+                                          "RMSE_test_ic95_sup", "R2_test"]].round(3).to_string(index=False))
 
 # ── compilar o que o estudo já gravou ──────────────────────────────────────────
 
@@ -459,6 +446,12 @@ def etapa_compilar(dados):
     keep = ["arm", "season", "tag", "model", "model_seed", "split", "n", "R2", "RMSE", "Bias",
             "Bias_P90", "RMSE_P90", "n_nonfinite"]
     me[keep].to_parquet(SAIDA / "06_metricas_arms.parquet", **PARQ)
+
+    # 09: importância por permutação da LSTM no arm `full` (seed 42), por coluna e por grupo
+    imp = pd.concat([pd.read_parquet(f) for f in sorted((ESTUDO / "units/full_lstm").glob("importance__*.parquet"))],
+                    ignore_index=True)
+    imp["variavel"] = [variable_of(n) if nv == "coluna" else n for n, nv in zip(imp.nome, imp.nivel)]
+    imp.to_parquet(SAIDA / "09_lstm_importancia_permutacao.parquet", **PARQ)
 
     # conferência: RMSE refeito das predições == RMSE gravado (antes do truncamento pode diferir
     # só em modelos degenerados)
